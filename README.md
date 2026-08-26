@@ -1,4 +1,8 @@
 
+# Disclaimer
+Current NewWFC feature does not use the payload, will be added on future commits
+Use at your own risk.
+
 # WiiCompiled
 
 A native PC port of Mario Kart Wii, made with static recompilation.
