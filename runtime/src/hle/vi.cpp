@@ -1,6 +1,7 @@
 #include "hle_stubs.h"
 #include "memory.h"
 #include "abi_bridge.h"
+#include "cheat_codes.h"
 #include "guest_interrupt_context.h"
 #include "ppc_runtime.h"
 #include "aurora_events.h"
@@ -271,7 +272,10 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
     if (s_inAdvanceRetrace.exchange(true)) {
         return;
     }
-    
+
+    // Once per real VBlank, matching a real Gecko codehandler's cadence (see cheat_codes.h).
+    CheatCodes::ApplyAll();
+
     uint32_t preCb = 0;
     uint32_t postCb = 0;
     uint32_t retraceValue = 0;

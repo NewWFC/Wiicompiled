@@ -23,11 +23,27 @@ internal sealed class InstallOptions
     public required string InstallDirectory { get; init; }
 
     /// <summary>
+    /// NewWFC-Legacy: redirects the base game's own embedded GameSpy/NAS hostnames to
+    /// recomp.yml's legacy_wfc.domain, independent of Retro Rewind's own Retro-WFC payload.
+    /// Base-only for now: rejected together with <see cref="RetroDirectoryPath"/>, since a
+    /// combined base+Retro Rewind build shares one data-section build graph and the interaction
+    /// between the two mechanisms on that shared path is unverified.
+    /// </summary>
+    public bool EnableLegacyWfc { get; init; }
+
+    /// <summary>
     /// Establish a portable installation: the parent of <see cref="InstallDirectory"/> becomes the
     /// portable root, gets the <c>portable.txt</c> marker and a <c>UserData</c> directory, and all
     /// runtime user state and <c>[paths]</c> settings stay inside it.
     /// </summary>
     public bool Portable { get; init; }
+
+    /// <summary>
+    /// Forces a specific x86-64 ISA baseline instead of auto-detecting the host CPU
+    /// (<see cref="CpuBaselineDetector.DetectHost"/>). Null (the default, "auto" on the CLI) is
+    /// what every normal install uses.
+    /// </summary>
+    public CpuBaseline? CpuBaselineOverride { get; init; }
 
     public bool HasRetroRewind => RetroDirectoryPath is not null;
 }
@@ -101,6 +117,7 @@ internal sealed class InstallState
     public string RetroWfcPayloadMode { get; set; } = "";
     public string RetroWfcPayloadSha256 { get; set; } = "";
     public long RetroWfcPayloadLength { get; set; }
+    public bool BaseLegacyWfcEnabled { get; set; }
 
     /// <summary>
     /// The <c>RetroRewind6</c> directory this installation was pointed at. The runtime's actual copy is
@@ -138,6 +155,14 @@ internal sealed class ProductFingerprint
     public string RetroWfcPayloadMode { get; set; } = "";
     public string RetroWfcPayloadSha256 { get; set; } = "";
     public long RetroWfcPayloadLength { get; set; }
+    public bool LegacyWfcEnabled { get; set; }
+    /// <summary>
+    /// The x86-64 ISA baseline (see <see cref="CpuBaseline"/>) this build targeted, as its CLI
+    /// flag spelling ("v3"/"v2"). Defaults to "v3": every product built before this field existed
+    /// was x86-64-v3, so an older fingerprint missing this property deserializes to the correct
+    /// historical value instead of a spurious mismatch.
+    /// </summary>
+    public string CpuBaseline { get; set; } = "v3";
     public DateTimeOffset BuiltUtc { get; set; } = DateTimeOffset.UtcNow;
 
     public const string FileName = "build-fingerprint.json";

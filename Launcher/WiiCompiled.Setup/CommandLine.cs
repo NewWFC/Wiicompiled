@@ -33,6 +33,8 @@ internal sealed record ModeRules
     public bool RequiresInstallDirectory { get; init; }
     public bool RequiresPayloadRoot { get; init; }
     public bool AcceptsPortable { get; init; }
+    public bool AcceptsLegacyWfc { get; init; }
+    public bool AcceptsCpuBaseline { get; init; }
 }
 
 internal sealed class CommandLine
@@ -46,6 +48,15 @@ internal sealed class CommandLine
     public bool ProgressJson { get; private set; }
     public string? PayloadRootPath { get; private set; }
     public bool Portable { get; private set; }
+    public bool EnableLegacyWfc { get; private set; }
+
+    /// <summary>
+    /// Null (the default, "auto" on the CLI) means auto-detect the host CPU
+    /// (<see cref="CpuBaselineDetector.DetectHost"/>). An explicit v3/v2 forces that baseline
+    /// regardless of the detected CPU - useful for testing the compatibility build on a v3-capable
+    /// machine, or forcing v3 back on if auto-detection is ever wrong for a given host.
+    /// </summary>
+    public CpuBaseline? CpuBaselineOverride { get; private set; }
 
     public static bool WantsProgressJson(string[] args) =>
         args.Any(argument => argument.Equals("--progress-json", StringComparison.OrdinalIgnoreCase));
@@ -69,6 +80,7 @@ internal sealed class CommandLine
                 case "--check-products": result.Mode = AppMode.CheckProducts; break;
                 case "--repair-products": result.Mode = AppMode.RepairProducts; break;
                 case "--portable": result.Portable = true; break;
+                case "--enable-legacy-wfc": result.EnableLegacyWfc = true; break;
                 case "--emit-payload-identities": result.Mode = AppMode.EmitPayloadIdentities; break;
                 case "--payload-root": result.PayloadRootPath = RequireValue(args, ref i); break;
                 case "--quiet": result.Quiet = true; break;
@@ -86,6 +98,9 @@ internal sealed class CommandLine
                     result.RetroWfcPayloadMode = RetroWfcPayloadMode.Skipped;
                     break;
                 case "--install-dir": result.InstallDirectory = RequireValue(args, ref i); break;
+                case "--cpu-baseline":
+                    result.CpuBaselineOverride = CpuBaselineOps.ParseOverride(RequireValue(args, ref i));
+                    break;
                 default:
                     throw new ArgumentException($"Unknown CLI option: {args[i]}");
             }
@@ -102,7 +117,7 @@ internal sealed class CommandLine
             Flag = "--silent",
             AcceptsProgressJson = true, AcceptsGame = true, RequiresGame = true,
             AcceptsRetroDirectory = true, AcceptsPayloadMode = true,
-            AcceptsPortable = true
+            AcceptsPortable = true, AcceptsLegacyWfc = true, AcceptsCpuBaseline = true
         },
         [AppMode.VerifyInputs] = new ModeRules
         {
@@ -118,7 +133,7 @@ internal sealed class CommandLine
         {
             Flag = "--repair-products",
             AcceptsProgressJson = true, AcceptsRetroDirectory = true, RequiresRetroDirectory = true,
-            AcceptsPayloadMode = true, RequiresInstallDirectory = true
+            AcceptsPayloadMode = true, RequiresInstallDirectory = true, AcceptsCpuBaseline = true
         },
         [AppMode.LaunchBase] = new ModeRules { Flag = "--launch-base" },
         [AppMode.LaunchRetro] = new ModeRules { Flag = "--launch-retro" },
@@ -153,6 +168,8 @@ internal sealed class CommandLine
         Reject(Portable && !rules.AcceptsPortable, "--portable");
         Reject(RetroWfcPayloadMode != RetroWfcPayloadMode.NotApplicable && !rules.AcceptsPayloadMode,
             "A Retro-WFC payload option");
+        Reject(EnableLegacyWfc && !rules.AcceptsLegacyWfc, "--enable-legacy-wfc");
+        Reject(CpuBaselineOverride is not null && !rules.AcceptsCpuBaseline, "--cpu-baseline");
 
         if (rules.RequiresGame && string.IsNullOrWhiteSpace(GamePath))
             throw new ArgumentException("--game is required.");
@@ -180,6 +197,9 @@ internal sealed class CommandLine
         if (RetroDirectoryPath is null && RetroWfcPayloadMode != RetroWfcPayloadMode.NotApplicable)
             throw new ArgumentException(
                 "--retro-dir is required when selecting a Retro-WFC payload option.");
+        if (EnableLegacyWfc && RetroDirectoryPath is not null)
+            throw new ArgumentException(
+                "--enable-legacy-wfc cannot be combined with --retro-dir in this release.");
     }
 
     private static string RequireValue(string[] args, ref int index)

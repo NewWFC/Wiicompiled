@@ -12,8 +12,11 @@ internal static class ToolkitFingerprint
 {
     // v6/native-toolchain v2 forces one clean rebuild past a Ninja stale-object bug.
     // translation v2 added runtime/src, which the translator regex-scans for native overrides.
+    // translation v3 makes code_patches.local.txt part of the Translation identity again (see
+    // BuildTranslationIdentity) - forces one clean rebuild so any cache recorded under the old,
+    // blind identity can't keep looking current after this update.
     private const string Version = "mkwc-toolkit-compile-v6";
-    private const string TranslationVersion = "mkwc-toolkit-translation-v2";
+    private const string TranslationVersion = "mkwc-toolkit-translation-v3";
     private const string NativeToolchainVersion = "mkwc-toolkit-native-toolchain-v2";
     private const string PackageVersion = "mkwc-toolkit-package-v1";
     private const string RuntimeAssetsVersion = "mkwc-product-runtime-assets-v3";
@@ -86,7 +89,12 @@ internal static class ToolkitFingerprint
             file => !Path.GetFileName(file).Equals("DolphinTool.exe", StringComparison.OrdinalIgnoreCase));
         AddFile(entries, root, Path.Combine(workspace, "LocalBuild.ps1"), cancellationToken);
         AddFile(entries, root, Path.Combine(workspace, "NativeBuildFlags.ps1"), cancellationToken);
-        AddDirectory(entries, root, Path.Combine(workspace, "projects"), null, cancellationToken);
+        // code_patches.local.txt is a deliberately mutable sidecar (see
+        // Translator.Cli/TranslationProjectConfig.cs) a frontend uses to toggle cheat code_patches
+        // on/off without that looking like toolkit tampering to VerifyToolkitForCompilation - the
+        // whole point of excluding it is that it's expected to change after install.
+        AddDirectory(entries, root, Path.Combine(workspace, "projects"), null, cancellationToken,
+            file => !Path.GetFileName(file).Equals("code_patches.local.txt", StringComparison.OrdinalIgnoreCase));
         var runtime = Path.Combine(workspace, "runtime");
         var runtimeAssets = Path.Combine(runtime, "assets");
         // runtime/assets is copied beside the executable; it is deliberately tracked by the
@@ -109,9 +117,45 @@ internal static class ToolkitFingerprint
 
         return new ToolkitFingerprintComponents(
             BuildIdentity(Version, entries),
-            BuildSubsetIdentity(TranslationVersion, entries, TranslationPrefixes, TranslationFiles),
+            BuildTranslationIdentity(entries, workspace, cancellationToken),
             BuildSubsetIdentity(NativeToolchainVersion, entries, NativeToolchainPrefixes,
                 NativeToolchainFiles));
+    }
+
+    /// <summary>
+    /// The Translation subset, plus every projects/**/code_patches.local.txt - deliberately absent
+    /// from <paramref name="entries"/> itself (see the exclusion above, which keeps a frontend's
+    /// cheat edits from looking like toolkit tampering to VerifyToolkitForCompilation's Compile
+    /// identity check). Left out here too, though, a code_patches change would never invalidate
+    /// LocalBuild.ps1's cached generated/ output, since that cache is keyed on exactly this
+    /// identity - the translator would silently keep reusing a translation from before the cheat
+    /// existed. Added back only for this one subset, so retranslation actually happens on a cheat
+    /// change without reintroducing the false "toolkit modified" positive for Compile.
+    /// </summary>
+    private static string BuildTranslationIdentity(SortedDictionary<string, string> entries, string workspace,
+        CancellationToken cancellationToken)
+    {
+        var subset = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (relative, hash) in entries)
+        {
+            if (TranslationPrefixes.Any(prefix => relative.StartsWith(prefix, StringComparison.Ordinal)) ||
+                TranslationFiles.Any(file => relative.Equals(file, StringComparison.Ordinal)))
+                subset[relative] = hash;
+        }
+
+        var projectsDir = Path.Combine(workspace, "projects");
+        if (Directory.Exists(projectsDir))
+        {
+            foreach (var file in Directory.EnumerateFiles(projectsDir, "code_patches.local.txt",
+                         SearchOption.AllDirectories))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var relative = "code-patches:" + Path.GetRelativePath(workspace, file).Replace('\\', '/');
+                subset[relative] = InputValidation.Sha256File(file);
+            }
+        }
+
+        return BuildIdentity(TranslationVersion, subset);
     }
 
     private static string BuildSubsetIdentity(string version, SortedDictionary<string, string> entries,

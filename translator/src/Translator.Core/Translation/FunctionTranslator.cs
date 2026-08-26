@@ -70,7 +70,26 @@ public sealed record TranslationOptions(
     /// acyclic and every exit is a plain return. Emergency opt-out; the
     /// straight-line shape keeps working with this off.
     /// </summary>
-    bool LeafInliningAllowMultiBlockCallees = true)
+    bool LeafInliningAllowMultiBlockCallees = true,
+    /// <summary>
+    /// A decode failure within [TolerateDecodeFailureFrom, TolerateDecodeFailureTo) stops exploring
+    /// that one path instead of throwing - see PpcDisassembler.LooksUnrecognized's doc for why. Only
+    /// ever set to a project's C2/C0 cheat scratch region (Translator.Cli's AsmHookScratchBase and
+    /// AsmHookScratchBase + AsmHookScratchCapacity), never for real game code - both bounds matter,
+    /// since scratch is not guaranteed to sit above every real game address (e.g. relocated into a
+    /// low-memory "Gecko hole"), and an open-ended lower bound alone would otherwise also tolerate
+    /// decode failures throughout ordinary game code above it.
+    /// </summary>
+    uint? TolerateDecodeFailureFrom = null,
+    uint? TolerateDecodeFailureTo = null,
+    /// <summary>
+    /// Diagnostic-only: makes every lowered guest instruction write its own address into
+    /// ctx->pc before executing, so a crash reports exactly which guest instruction faulted
+    /// instead of a stale/approximate PC (see PpcRuntime's crash dump, which already prints
+    /// ctx->pc - it is simply never written today). Adds a store per instruction across the
+    /// whole build, so this is opt-in for a one-off traced rebuild, never a normal compile.
+    /// </summary>
+    bool EmitPcTrace = false)
 {
     public static TranslationOptions Default { get; } = new();
 }
@@ -241,7 +260,9 @@ public sealed class FunctionTranslator
                 options.MaxInstructions,
                 options.MaxBytes,
                 options.KnownFunctionEntryPoints,
-                boundaryProbes);
+                boundaryProbes,
+                options.TolerateDecodeFailureFrom,
+                options.TolerateDecodeFailureTo);
             if (decoded is null)
             {
                 instructions = Array.Empty<PpcInstruction>();
@@ -259,7 +280,9 @@ public sealed class FunctionTranslator
                 options.MaxInstructions,
                 options.MaxBytes,
                 options.KnownFunctionEntryPoints,
-                boundaryProbes);
+                boundaryProbes,
+                options.TolerateDecodeFailureFrom,
+                options.TolerateDecodeFailureTo);
         }
         disSw.Stop();
         if (metrics is not null)
@@ -723,7 +746,7 @@ public sealed class FunctionTranslator
         RepresentationEnvironment types,
         TranslationOptions options)
     {
-        return new CxxLinearCodeGenerator(_guestAbiProvider).EmitWithFacts(
+        return new CxxLinearCodeGenerator(_guestAbiProvider, options.EmitPcTrace).EmitWithFacts(
             entryPoint,
             ssa,
             signature,

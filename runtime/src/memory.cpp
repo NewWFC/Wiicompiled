@@ -541,6 +541,20 @@ Memory::Config Memory::Config::WiiDefaults() {
         .sizeBytes = 0x200000,
     });
 
+    // Static-recompile cheat scratch (Gecko C2 hook bodies, C0 standalone blocks - see the
+    // translator's Translator.Cli/Program.cs BuildAsmHookScratchLayout, which must place scratch at
+    // exactly this address). Immediately past MEM1_KAMEK_OVERLAY, not inside it: a user's own
+    // custom cheats must never compete with Retro Rewind's own compiled module for the same bytes.
+    // Same reasoning as the Kamek overlay applies - the original game could never legitimately
+    // reach here, since its own arena/heap sizing was fixed at Nintendo's compile time, and it must
+    // stay within +/-32 MiB of every DOL/StaticR hook site for the C2 branch's rel24 encoding.
+    // EXPERIMENT (temporary): cheat scratch now lives inside the existing MEM1 region above
+    // (0x80002000, in the conventional low-memory "Gecko hole") instead of its own dedicated
+    // BASE_CHEAT_SCRATCH region, sidestepping the 64 KiB region-base alignment requirement
+    // entirely - no separate region registration needed since MEM1 already covers that address.
+    // Revert: re-add { .name = "BASE_CHEAT_SCRATCH", .baseAddress = 0x81A00000, .sizeBytes =
+    // 0x100000 } here and set AsmHookScratchBase/AsmHookScratchCapacity back in Program.cs.
+
     // Locked cache (THP decoder fast RAM) is really 16KB at 0xE0000000, but a sub-page mapping can
     // never enter the coarse 1MiB bias tables, forcing every THP load/store through the checked
     // fallback (the dominant cost of THP-heavy screens). Back a full 1MiB page plus the successor

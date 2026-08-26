@@ -2,6 +2,8 @@ using System.Globalization;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 using Translator.Core.Loading;
+using Translator.Core.Mods;
+using Translator.Core.Parsing.Dol;
 
 namespace Translator.Cli.Configuration;
 
@@ -16,6 +18,8 @@ internal sealed class TranslationProjectConfig
         ProjectTranslation translation,
         ProjectRuntime runtime,
         ProjectOutput output,
+        ProjectLegacyWfc? legacyWfc,
+        CodePatchGroup codePatches,
         IReadOnlyDictionary<string, ProjectProfile> profiles)
     {
         SourcePath = sourcePath;
@@ -26,6 +30,8 @@ internal sealed class TranslationProjectConfig
         Translation = translation;
         Runtime = runtime;
         Output = output;
+        LegacyWfc = legacyWfc;
+        CodePatches = codePatches;
         Profiles = profiles;
     }
 
@@ -37,6 +43,8 @@ internal sealed class TranslationProjectConfig
     public ProjectTranslation Translation { get; }
     public ProjectRuntime Runtime { get; }
     public ProjectOutput Output { get; }
+    public ProjectLegacyWfc? LegacyWfc { get; }
+    public CodePatchGroup CodePatches { get; }
     public IReadOnlyDictionary<string, ProjectProfile> Profiles { get; }
 
     public static TranslationProjectConfig Load(string path)
@@ -113,6 +121,37 @@ internal sealed class TranslationProjectConfig
             ResolveOutput(outputRoot, dto.Output?.DataInitializer, "data_sections_init.cpp"),
             ResolveOutput(outputRoot, dto.Output?.BaseManifest, Path.Combine("base", "base_manifest.json")));
 
+        ProjectLegacyWfc? legacyWfc = null;
+        if (dto.LegacyWfc is { } legacyWfcDto)
+        {
+            var domain = Require(legacyWfcDto.Domain, "legacy_wfc.domain");
+            var rewriteHosts = legacyWfcDto.RewriteHosts ?? [];
+            if (rewriteHosts.Count == 0)
+            {
+                throw new InvalidDataException("legacy_wfc.rewrite_hosts must list at least one hostname to redirect.");
+            }
+            legacyWfc = new ProjectLegacyWfc(domain, rewriteHosts);
+        }
+
+        // CodePatchGroupParser (not DolCodePatcher.ParseLines directly) because a code_patches block
+        // can mix the basic-write family (00-09, spanning one line each except 06/07/08/09) with
+        // C0/C2/D2 hook codes (Mods/AsmHookCodePatcher.cs), which need a different application
+        // mechanism entirely - see CodePatchGroup's own doc.
+        var codePatchLines = new List<string>(dto.CodePatches ?? []);
+        // code_patches.local.txt: a sidecar next to recomp.yml, one "AAAAAAAA VVVVVVVV" line per
+        // patch, deliberately NOT part of recomp.yml itself. ToolkitFingerprint.ComputeComponents
+        // hashes every file under an installed workspace's projects/ directory as part of the
+        // "has this toolkit been tampered with" check that gates every compile - a UI that lets
+        // someone toggle cheats on and off needs a way to change what gets compiled without
+        // tripping that check every time, which editing recomp.yml in place cannot do (see
+        // Launcher/WiiCompiled.Setup/ToolkitFingerprint.cs's exclusion for this exact file).
+        var localCodePatchesPath = Path.Combine(manifestDirectory, "code_patches.local.txt");
+        if (File.Exists(localCodePatchesPath))
+        {
+            codePatchLines.AddRange(File.ReadAllLines(localCodePatchesPath));
+        }
+        var codePatches = CodePatchGroupParser.ParseLines(codePatchLines);
+
         var profiles = new Dictionary<string, ProjectProfile>(StringComparer.OrdinalIgnoreCase);
         foreach (var (name, profileDto) in dto.Profiles ?? new Dictionary<string, ProfileDto>())
         {
@@ -144,6 +183,8 @@ internal sealed class TranslationProjectConfig
             translation,
             runtime,
             output,
+            legacyWfc,
+            codePatches,
             profiles);
         config.ValidateInputs();
         return config;
@@ -359,6 +400,8 @@ internal sealed class TranslationProjectConfig
         public TranslationDto? Translation { get; init; }
         public RuntimeDto? Runtime { get; init; }
         public OutputDto? Output { get; init; }
+        public LegacyWfcDto? LegacyWfc { get; init; }
+        public List<string>? CodePatches { get; init; }
         public Dictionary<string, ProfileDto>? Profiles { get; init; }
     }
 
@@ -427,6 +470,17 @@ internal sealed class TranslationProjectConfig
         public string? BaseManifest { get; init; }
     }
 
+    // NewWFC-Legacy: an opt-in toggle that redirects the base (non-modded) build's embedded
+    // GameSpy/NAS hostnames to a replacement domain via NetworkDomainRewriter, in place of the
+    // Nintendo servers that no longer exist. Unlike enable_retro_wfc, this rewrites literal
+    // strings already present in the game's data sections rather than lowering a signed binary
+    // patch payload, so it needs no module memory region and applies independently of any profile.
+    private sealed class LegacyWfcDto
+    {
+        public string? Domain { get; init; }
+        public List<string>? RewriteHosts { get; init; }
+    }
+
     private sealed class ProfileDto
     {
         public bool? Enabled { get; init; }
@@ -476,6 +530,7 @@ internal sealed record ProjectTranslation(
 internal sealed record ProjectRuntime(
     IReadOnlyList<string> NativeAbiDirectories,
     string NativeRegistrationRoot);
+internal sealed record ProjectLegacyWfc(string Domain, IReadOnlyList<string> RewriteHosts);
 internal sealed record ProjectOutput(
     string Root,
     string Functions,

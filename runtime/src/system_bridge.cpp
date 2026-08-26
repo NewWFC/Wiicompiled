@@ -19,6 +19,7 @@
 #include "memory.h"
 #include "ppc_runtime.h"
 #include "recomp_mod_loader.h"
+#include "runtime_config.h"
 #include "runtime_log.h"
 #include "runtime_product.h"
 #include "timebase_contract.h"
@@ -510,6 +511,12 @@ void SystemBridge::SeedLowMemDefaults(const Memory::Config& config) {
     entries.push_back({0x80003194u, 0x524D4350u, "OS app gamename"});  // RMCP
     if (RuntimeProduct::IsRetroRewind()) {
         entries.push_back({0x800017D8u, 0x00000001u, "Retro Rewind recomp runtime marker", true});
+    }
+
+    // DWC's hidden logging (Config.toml [network] dwc_debug_log_mask). PAL-only address, matching
+    // this project's sole target region; the value is a bitmask of LEVEL_* flags OSReport prints.
+    if (const uint32_t dwcDebugLogMask = RuntimeConfigFile::DwcDebugLogMask(); dwcDebugLogMask != 0) {
+        entries.push_back({0x803862C0u, dwcDebugLogMask, "DWC hidden debug logging", true});
     }
 
     for (const auto& reservation : RecompMod::MemoryReservations()) {

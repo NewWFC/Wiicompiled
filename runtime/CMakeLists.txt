@@ -83,6 +83,12 @@ endif()
 set(MKW_TRANSLATED_COMPILE_JOBS 0 CACHE STRING
     "Cap on concurrently compiling translated shard TUs via a Ninja job pool (0 = uncapped). \
 Scheduling only - never affects output bytes, so it is deliberately outside the canonical flag fingerprint.")
+set(MKW_CPU_BASELINE "v3" CACHE STRING
+    "Target x86-64 ISA baseline for every compiled-from-source target: v3 (AVX2/FMA/BMI1/BMI2/F16C/LZCNT, \
+Haswell 2013+/Excavator 2015+, the default) or v2 (SSE3/SSSE3/SSE4.1/SSE4.2/POPCNT/CMPXCHG16B/LAHF-SAHF, \
+Nehalem 2008+/Bulldozer 2011+, for older CPUs). See runtime/src/host_cpu_baseline.cpp for the matching \
+startup CPUID guard.")
+set_property(CACHE MKW_CPU_BASELINE PROPERTY STRINGS v3 v2)
 set(MKW_CPPWINRT_INCLUDE_DIR "" CACHE PATH "Optional self-contained C++/WinRT include directory")
 
 # Precompiled aurora + third-party package (see launcher/Prepare-NativePrebuilt.ps1).

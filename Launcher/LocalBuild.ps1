@@ -7,12 +7,25 @@ param(
     # legs separately recompiles all of mkw_base_shared in the second leg, because the
     # retro-aware shard emission changes the content identity of every base_common shard.
     [Parameter(Mandatory)] [ValidateSet('base', 'retro-rewind', 'both')] [string]$Profile,
+    # x86-64 ISA baseline for every compiled-from-source target (MKW_CPU_BASELINE in
+    # runtime/CMakeLists.txt / PublicProducts.cmake): 'v3' needs AVX2/FMA/BMI1/BMI2/F16C/LZCNT
+    # (Haswell 2013+/Excavator 2015+); 'v2' needs only SSE3/SSSE3/SSE4.1/SSE4.2/POPCNT/CMPXCHG16B/
+    # LAHF-SAHF (Nehalem 2008+/Bulldozer 2011+), for machines that fail the v3 CPUID guard
+    # (runtime/src/host_cpu_baseline.cpp). Mandatory rather than defaulted, like -Profile, so no
+    # caller can silently build the wrong baseline for its target machine. Objects compiled with
+    # different -march flags cannot share a build directory, so this also selects a
+    # baseline-specific native-build subdirectory below.
+    [Parameter(Mandatory)] [ValidateSet('v3', 'v2')] [string]$CpuBaseline,
     [Parameter(Mandatory)] [string]$OutputDirectory,
     [string]$BaseOutputDirectory,
     [string]$RetroRewindPackageDirectory,
     [string]$RetroWfcOfflineDirectory,
     [ValidateSet('offline', 'downloaded')] [string]$RetroWfcPayloadOrigin = 'offline',
     [switch]$SkipRetroWfcPayload,
+    # NewWFC-Legacy: redirects the base game's own embedded GameSpy/NAS hostnames (not Retro
+    # Rewind's Retro-WFC payload mechanism) to recomp.yml's legacy_wfc.domain. Independent of
+    # -Profile: it applies to whichever data sections generate-data-init emits this run.
+    [switch]$EnableLegacyWfc,
     # The caller's recomputed cache-reuse identities (see ToolkitFingerprint.ComputeComponents).
     # They are compared against the provenance recorded beside the caches themselves; a missing or
     # mismatched identity degrades that cache to a clean rebuild, never the other way around.
@@ -21,7 +34,14 @@ param(
     # Discards every cache first. Used when a product was reported broken/blocked, so a possibly
     # corrupted translation or build directory can never contribute to the repaired product.
     [switch]$ForceCleanBuild,
-    [int]$Parallel = 0
+    [int]$Parallel = 0,
+    # Diagnostic-only: makes every lowered guest instruction write its own address into ctx->pc
+    # (see Translator.Cli's --trace-pc / TranslationOptions.EmitPcTrace), so a crash report shows
+    # exactly which guest instruction faulted instead of an approximate stack-scan guess. Adds a
+    # store per instruction across the whole build - never set for a normal compile, and the
+    # result is never cached as reusable (see -TranslationFingerprint below), so the next ordinary
+    # build always retranslates cleanly instead of inheriting a traced, slower build.
+    [switch]$EmitPcTrace
 )
 
 $ErrorActionPreference = 'Stop'
@@ -141,6 +161,12 @@ if (-not $buildsRetro -and ($hasOfflineRetroWfc -or $SkipRetroWfcPayload)) {
 if ($buildsRetro -and ($hasOfflineRetroWfc -eq [bool]$SkipRetroWfcPayload)) {
     throw 'Choose exactly one Retro-WFC mode: -RetroWfcOfflineDirectory or -SkipRetroWfcPayload.'
 }
+if ($EnableLegacyWfc -and $buildsRetro) {
+    # generate-data-init runs once and its output is shared by both products in a combined build;
+    # NewWFC-Legacy's interaction with Retro Rewind's own Retro-WFC payload on that shared path is
+    # unverified, so this stays base-only until that's explicitly proven out.
+    throw '-EnableLegacyWfc is valid only for a base-only build (-Profile base).'
+}
 if (-not $buildsRetro -and -not [string]::IsNullOrWhiteSpace($RetroRewindPackageDirectory)) {
     throw '-RetroRewindPackageDirectory is valid only for a Retro Rewind build.'
 }
@@ -165,7 +191,9 @@ $baseMetadata = Join-Path $generated 'base_translation_output.json'
 $baseManifestDir = Join-Path $Workspace 'build\base'
 $baseManifest = Join-Path $baseManifestDir 'mkwii_base_manifest.json'
 $shards = Join-Path $generated 'build_shards'
-$build = Join-Path $Workspace 'native-build'
+# v3 and v2 objects cannot share a build directory (different -march = incompatible compiled
+# objects for the same target names), so each baseline gets its own subdirectory.
+$build = Join-Path $Workspace "native-build\$CpuBaseline"
 $retroRoot = if ([string]::IsNullOrWhiteSpace($RetroRewindPackageDirectory)) {
     Join-Path $Workspace 'PulsarPacks\completed\RetroRewind\RetroRewind6'
 } else {
@@ -233,7 +261,7 @@ try {
         # already knows this Code.pul. Otherwise it retranslates incrementally: content-addressed
         # outputs plus --prune-stale mean Ninja only recompiles shards whose bytes actually moved.
         $reuseBase = $false
-        if (-not $ForceCleanBuild -and -not [string]::IsNullOrWhiteSpace($TranslationFingerprint) -and
+        if (-not $ForceCleanBuild -and -not $EmitPcTrace -and -not [string]::IsNullOrWhiteSpace($TranslationFingerprint) -and
             (Get-RecordedFingerprint $translationProvenance 'TranslationFingerprint') -eq $TranslationFingerprint) {
             $artifacts = @($baseMetadata, $baseManifest, (Join-Path $generated 'base_translation_sources.bin'),
                 (Join-Path $generated 'base_translation_mod_awareness.json'))
@@ -294,19 +322,23 @@ try {
             # No --clean-outdir: shard names are content-addressed and unchanged files keep their
             # bytes and mtimes, which is exactly what lets Ninja skip them. --prune-stale (active
             # only without --clean-outdir) removes everything the new translation no longer emits.
-            Invoke-Checked $translator @(
+            $translateArgs = @(
                 'translate-recursive', $pins.EntryPoint, '--project', $project,
                 '--outdir', $functions, '--output-metadata', $baseMetadata,
                 '--production-source-bundle', (Join-Path $generated 'base_translation_sources.bin'),
                 '--no-function-files', '--prune-stale', '--threads', $translatorThreads
-            ) 'Translating the user-owned base game' -StepId 'translate-base'
+            )
+            if ($EmitPcTrace) { $translateArgs += '--trace-pc' }
+            Invoke-Checked $translator $translateArgs 'Translating the user-owned base game' -StepId 'translate-base'
 
             Invoke-Checked $translator @(
                 'emit-base-manifest', '--project', $project, '--out', $baseManifestDir,
                 '--functions-dir', $functions, '--translation-output-metadata', $baseMetadata, '--region', 'P'
             ) 'Creating the local base translation manifest' -StepId 'emit-base-manifest'
 
-            if (-not [string]::IsNullOrWhiteSpace($TranslationFingerprint)) {
+            # A traced build must never look reusable to a later ordinary build - it is slower and
+            # diagnostic-only, so leave no provenance record for it to match against.
+            if (-not $EmitPcTrace -and -not [string]::IsNullOrWhiteSpace($TranslationFingerprint)) {
                 [ordered]@{ SchemaVersion = 1; TranslationFingerprint = $TranslationFingerprint } |
                     ConvertTo-Json | Set-Content -LiteralPath $translationProvenance -Encoding UTF8
             }
@@ -337,7 +369,9 @@ try {
                 -StepId 'translate-mod'
         }
 
-        Invoke-Checked $translator @('generate-data-init', '--project', $project) `
+        $dataInitArguments = @('generate-data-init', '--project', $project)
+        if ($EnableLegacyWfc) { $dataInitArguments += '--enable-legacy-wfc' }
+        Invoke-Checked $translator $dataInitArguments `
             'Generating local game data initialization' -StepId 'generate-data-init'
 
         $shardArgs = @(
@@ -388,7 +422,7 @@ try {
             -SourceDirectory (Join-Path $Workspace 'runtime') -BuildDirectory $build `
             -Ninja $ninja -CCompiler $cc -CxxCompiler $cxx -ResourceCompiler $windres `
             -DependenciesDirectory $dependencies -NativePrebuiltDirectory $nativePrebuilt `
-            -AdditionalArguments @("-DMKW_TRANSLATED_COMPILE_JOBS=$translatedJobs")
+            -AdditionalArguments @("-DMKW_TRANSLATED_COMPILE_JOBS=$translatedJobs", "-DMKW_CPU_BASELINE=$CpuBaseline")
         Invoke-Checked $cmake $configure 'Configuring the bundled native toolchain' -StepId 'configure-native'
         if (-not [string]::IsNullOrWhiteSpace($NativeToolchainFingerprint)) {
             [ordered]@{ SchemaVersion = 1; NativeToolchainFingerprint = $NativeToolchainFingerprint } |
@@ -439,6 +473,8 @@ try {
                 RetroWfcPayloadMode = if (-not $isRetro) { $null } elseif ($SkipRetroWfcPayload) { 'skipped' } else { $RetroWfcPayloadOrigin }
                 RetroWfcPayloadSha256 = if ($isRetro -and -not $SkipRetroWfcPayload) { Get-MkwFileSha256 (Join-Path $RetroWfcOfflineDirectory 'binary\payload.RMCPD00.bin') } else { $null }
                 RetroWfcPayloadLength = if ($isRetro -and -not $SkipRetroWfcPayload) { (Get-Item -LiteralPath (Join-Path $RetroWfcOfflineDirectory 'binary\payload.RMCPD00.bin')).Length } else { $null }
+                LegacyWfcEnabled = [bool]$EnableLegacyWfc
+                CpuBaseline = $CpuBaseline
                 Compiler = "llvm-mingw clang-22 sha256:$compilerSha"
             }
             $provenance | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Destination 'local-build.json') -Encoding UTF8

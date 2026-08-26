@@ -1108,6 +1108,33 @@ internal static class SelfTests
                 throw new Exception(
                     "A native_prebuilt provenance rewrite needlessly changed the compile identity.");
 
+            // code_patches.local.txt is the frontend's mutable cheat sidecar (see CheatsService):
+            // it must never look like toolkit tampering (Compile unchanged), but it must still
+            // invalidate LocalBuild.ps1's cached translation (Translation changed) - otherwise a
+            // cheat change silently keeps compiling with a translation from before the cheat existed.
+            var beforeCodePatches = ToolkitFingerprint.ComputeComponents(root);
+            var codePatches = Path.Combine(root, "BuildWorkspace", "projects", "mkwii",
+                "code_patches.local.txt");
+            File.WriteAllText(codePatches, "C0000000 00000001\n00000000 4E800020\n");
+            var afterCodePatches = ToolkitFingerprint.ComputeComponents(root);
+            if (afterCodePatches.Compile != beforeCodePatches.Compile)
+                throw new Exception("A cheat code_patches.local.txt change looked like toolkit tampering.");
+            if (afterCodePatches.Translation == beforeCodePatches.Translation)
+                throw new Exception(
+                    "A cheat code_patches.local.txt change did not invalidate the translation cache.");
+            if (afterCodePatches.NativeToolchain != beforeCodePatches.NativeToolchain)
+                throw new Exception("A cheat code_patches.local.txt change needlessly changed the native toolchain identity.");
+            File.WriteAllText(codePatches, "C0000000 00000001\n00000000 4E800021\n");
+            var afterCodePatchesEdit = ToolkitFingerprint.ComputeComponents(root);
+            if (afterCodePatchesEdit.Translation == afterCodePatches.Translation)
+                throw new Exception("Editing an existing code_patches.local.txt did not change the translation identity.");
+            File.Delete(codePatches);
+            var afterCodePatchesRemoved = ToolkitFingerprint.ComputeComponents(root);
+            if (afterCodePatchesRemoved.Translation == afterCodePatchesEdit.Translation)
+                throw new Exception("Removing code_patches.local.txt did not change the translation identity.");
+            if (afterCodePatchesRemoved.Translation != beforeCodePatches.Translation)
+                throw new Exception("Removing code_patches.local.txt did not restore the original translation identity.");
+
             var runtimeLink = Path.Combine(root, "BuildWorkspace", "runtime", "assets", "wii", "linked-assets");
             if (TryCreateDirectoryLink(runtimeLink,
                     Path.Combine(root, "BuildWorkspace", "runtime", "assets", "wii", "shared2")))
@@ -1270,11 +1297,11 @@ internal static class SelfTests
             var dolSha = InputValidation.Sha256File(Path.Combine(gameSys, "main.dol"));
             var relSha = InputValidation.Sha256File(Path.Combine(gameRel, "StaticR.rel"));
             var inputsA = CompileInputsFingerprint.Compute(canonical);
-            LocalBuildService.WriteFingerprint(installation.BaseDirectory, BuildProfile.Base, fingerprint,
-                dolSha, relSha, "", RetroWfcPayloadMode.NotApplicable);
             JsonState.Write(Path.Combine(installation.BaseDirectory, LocalBuildProvenance.FileName),
                 new LocalBuildProvenance { SchemaVersion = 1, Profile = "base", DolSha256 = dolSha,
                     RelSha256 = relSha });
+            LocalBuildService.WriteFingerprint(installation.BaseDirectory, BuildProfile.Base, fingerprint,
+                dolSha, relSha, "", RetroWfcPayloadMode.NotApplicable);
             JsonState.Write(Path.Combine(installation.RetroDirectory, ProductFingerprint.FileName),
                 new ProductFingerprint
                 {

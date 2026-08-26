@@ -24,10 +24,27 @@ public static class DataSectionGenerator
         string outputPath,
         string projectName = "PowerPC DOL",
         string relName = "rel_module",
-        string? blobReferenceDirectory = null)
+        string? blobReferenceDirectory = null,
+        IReadOnlyList<NetworkDomainRewriter.DomainRewrite>? domainRewrites = null,
+        IReadOnlyList<(string Name, uint Address, byte[] Data)>? extraSections = null)
     {
         var sections = new List<DataSectionEntry>();
-        
+        var rewriteMatches = new List<NetworkDomainRewriter.Match>();
+
+        ReadOnlyMemory<byte> ApplyRewrites(ReadOnlyMemory<byte> data, bool executable)
+        {
+            // Domain strings only ever live in data; skipping .text avoids ever scanning compiled
+            // instructions, even though a false-positive match there is already astronomically
+            // unlikely (a 10+ byte exact ASCII match immediately followed by a NUL).
+            if (domainRewrites is not { Count: > 0 } || executable)
+            {
+                return data;
+            }
+            var (rewritten, matches) = NetworkDomainRewriter.Rewrite(data.Span, domainRewrites);
+            rewriteMatches.AddRange(matches);
+            return rewritten;
+        }
+
         // Add DOL data sections (skip .bss - it's zero-initialized)
         foreach (var section in dol.Sections)
         {
@@ -35,25 +52,46 @@ public static class DataSectionGenerator
             {
                 continue;
             }
-            
+
             // Include both code and data sections - they all need to be in memory
             sections.Add(new DataSectionEntry(
                 Name: SanitizeName(section.Name),
                 Address: section.VirtualAddress,
-                Data: section.Data,
+                Data: ApplyRewrites(section.Data, section.IsExecutable),
                 Source: "DOL"));
         }
-        
+
         // Add REL data if provided
         if (rel != null && rel.Data.Length > 0)
         {
             sections.Add(new DataSectionEntry(
                 Name: SanitizeName(relName),
                 Address: rel.BaseAddress,
-                Data: rel.Data,
+                Data: ApplyRewrites(rel.Data, executable: false),
                 Source: "REL"));
         }
-        
+
+        if (domainRewrites is { Count: > 0 })
+        {
+            Console.WriteLine($"[translator] NewWFC-Legacy: rewrote {rewriteMatches.Count} embedded hostname(s).");
+            foreach (var match in rewriteMatches)
+            {
+                Console.WriteLine($"[translator]   \"{match.Original}\" -> \"{match.Replacement}\"");
+            }
+        }
+
+        // C2 hook scratch space / C0 blocks (see Translator.Cli's BuildAsmHookScratchLayout) live
+        // past the end of the DOL/REL's own declared sections, so they need their own embedded
+        // blob(s) the same way a DOL/REL section does - otherwise the compiled game would branch
+        // into (or, for a C0 block, never even reach) uninitialized guest memory at boot.
+        if (extraSections is { Count: > 0 })
+        {
+            foreach (var (name, address, data) in extraSections)
+            {
+                sections.Add(new DataSectionEntry(SanitizeName(name), address, data, "AsmHook"));
+            }
+        }
+
         var blobDirectory = Path.Combine(
             Path.GetDirectoryName(outputPath) ?? ".",
             Path.GetFileNameWithoutExtension(outputPath) + "_blobs");

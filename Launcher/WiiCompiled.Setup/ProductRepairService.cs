@@ -27,6 +27,15 @@ internal sealed class ProductRepairService
         /// snapshot lives in operation scratch, so it can never be the durable value.
         /// </summary>
         public string? CanonicalRetroRewindRoot { get; init; }
+
+        /// <summary>
+        /// NewWFC-Legacy for the base product; ignored by <see cref="RepairRetroAsync"/>. See
+        /// <see cref="InstallOptions.EnableLegacyWfc"/> for why this is base-only.
+        /// </summary>
+        public bool EnableLegacyWfc { get; init; }
+
+        /// <summary>x86-64 ISA baseline to build with, resolved by the caller (override or detected).</summary>
+        public CpuBaseline CpuBaseline { get; init; } = CpuBaseline.V3;
     }
 
     internal sealed record ReconciliationResult(
@@ -143,7 +152,15 @@ internal sealed class ProductRepairService
             canonicalError: null, cachedPayloadMatchesSnapshot);
         var desiredInputDrift = FindDesiredInputDrift(_installation, toolkitFingerprint,
             expectedDolSha256, expectedRelSha256);
-        var rebuildBase = RequiresCompilation(baseState.Status) || desiredInputDrift.Base;
+        // A Retro Rewind operation (snapshot is not null) never expresses an opinion on
+        // NewWFC-Legacy - options.EnableLegacyWfc defaults to false on that path regardless of
+        // what the base product currently has, so treating that as a request to change it would
+        // spuriously disable an already-enabled base setting on every unrelated Retro Rewind
+        // repair. Only a base-only operation (RepairBaseAsync) can request a change here.
+        var legacyWfcDrift = snapshot is null && options.EnableLegacyWfc !=
+            (_installation.ReadProductFingerprint(_installation.BaseDirectory, toolkitFingerprint)
+                ?.LegacyWfcEnabled ?? false);
+        var rebuildBase = RequiresCompilation(baseState.Status) || desiredInputDrift.Base || legacyWfcDrift;
         var rebuildRetro = false;
         var syncRetroWfcPayload = false;
 
@@ -236,16 +253,18 @@ internal sealed class ProductRepairService
                 await BuildWithCleanRetryAsync(forceCleanBuild, clean =>
                     builder.BuildAsync(_installation.Root, BuildProfile.Both, retroOutput,
                         requestedPayloadMode, payloadSnapshot?.Directory, cancellationToken,
-                        toolkitComponents, clean,
+                        options.CpuBaseline, toolkitComponents, clean,
                         progress: new BuildProgressWindow(_reporter, InstallStages.BuildBase, 5, 92),
                         retroRewindPackageDirectory: compileInputs.RetroRewindRoot,
                         baseOutputDirectory: baseOutput));
                 LocalBuildService.WriteFingerprint(baseOutput, BuildProfile.Base, toolkitFingerprint,
-                    dolSha, relSha, "", RetroWfcPayloadMode.NotApplicable);
+                    dolSha, relSha, "", RetroWfcPayloadMode.NotApplicable,
+                    cpuBaseline: options.CpuBaseline.ToFlag());
                 LocalBuildService.WriteFingerprint(retroOutput, BuildProfile.RetroRewind,
                     toolkitFingerprint, dolSha, relSha, compileInputs.CodePulSha256,
                     requestedPayloadMode, compileInputs.CompileInputsSha256,
-                    payloadSnapshot?.Sha256 ?? "", payloadSnapshot?.ByteLength ?? 0);
+                    payloadSnapshot?.Sha256 ?? "", payloadSnapshot?.ByteLength ?? 0,
+                    cpuBaseline: options.CpuBaseline.ToFlag());
             }
             else if (rebuildBase)
             {
@@ -255,10 +274,12 @@ internal sealed class ProductRepairService
                 await BuildWithCleanRetryAsync(forceCleanBuild, clean =>
                     builder.BuildAsync(_installation.Root, BuildProfile.Base, baseOutput,
                         RetroWfcPayloadMode.NotApplicable, null, cancellationToken,
-                        toolkitComponents, clean,
-                        progress: new BuildProgressWindow(_reporter, InstallStages.BuildBase, 5, 92)));
+                        options.CpuBaseline, toolkitComponents, clean,
+                        progress: new BuildProgressWindow(_reporter, InstallStages.BuildBase, 5, 92),
+                        enableLegacyWfc: options.EnableLegacyWfc));
                 LocalBuildService.WriteFingerprint(baseOutput, BuildProfile.Base, toolkitFingerprint,
-                    dolSha, relSha, "", RetroWfcPayloadMode.NotApplicable);
+                    dolSha, relSha, "", RetroWfcPayloadMode.NotApplicable,
+                    enableLegacyWfc: options.EnableLegacyWfc, cpuBaseline: options.CpuBaseline.ToFlag());
             }
             else
             {
@@ -270,13 +291,14 @@ internal sealed class ProductRepairService
                 await BuildWithCleanRetryAsync(forceCleanBuild, clean =>
                     builder.BuildAsync(_installation.Root, BuildProfile.RetroRewind, retroOutput,
                         requestedPayloadMode, payloadSnapshot?.Directory, cancellationToken,
-                        toolkitComponents, clean,
+                        options.CpuBaseline, toolkitComponents, clean,
                         progress: new BuildProgressWindow(_reporter, InstallStages.BuildRetro, 5, 92),
                         retroRewindPackageDirectory: compileInputs.RetroRewindRoot));
                 LocalBuildService.WriteFingerprint(retroOutput, BuildProfile.RetroRewind,
                     toolkitFingerprint, dolSha, relSha, compileInputs.CodePulSha256,
                     requestedPayloadMode, compileInputs.CompileInputsSha256,
-                    payloadSnapshot?.Sha256 ?? "", payloadSnapshot?.ByteLength ?? 0);
+                    payloadSnapshot?.Sha256 ?? "", payloadSnapshot?.ByteLength ?? 0,
+                    cpuBaseline: options.CpuBaseline.ToFlag());
             }
         }
 

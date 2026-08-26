@@ -532,6 +532,7 @@ MKW_MEMORY_FORCE_INLINE void FlatStore(uint32_t address, T value) {
 MKW_MEMORY_FORCE_INLINE uint8_t FlatRead8(uint32_t address) { return FlatLoad<uint8_t>(address); }
 MKW_MEMORY_FORCE_INLINE uint16_t FlatRead16(uint32_t address) { return FlatLoad<uint16_t>(address); }
 MKW_MEMORY_FORCE_INLINE uint32_t FlatRead32(uint32_t address) { return FlatLoad<uint32_t>(address); }
+MKW_MEMORY_FORCE_INLINE uint64_t FlatRead64(uint32_t address) { return FlatLoad<uint64_t>(address); }
 
 MKW_MEMORY_FORCE_INLINE float FlatReadFloat32(uint32_t address) {
     const uint32_t bits = FlatLoad<uint32_t>(address);
@@ -560,6 +561,11 @@ MKW_MEMORY_FORCE_INLINE void FlatWrite16(uint32_t address, uint16_t value) {
 MKW_MEMORY_FORCE_INLINE void FlatWrite32(uint32_t address, uint32_t value) {
     if (FlatWriteNeedsPolicy(address)) [[unlikely]] { Write32Slow(address, value); return; }
     FlatStore<uint32_t>(address, value);
+}
+
+MKW_MEMORY_FORCE_INLINE void FlatWrite64(uint32_t address, uint64_t value) {
+    if (FlatWriteNeedsPolicy(address)) [[unlikely]] { Write64Slow(address, value); return; }
+    FlatStore<uint64_t>(address, value);
 }
 
 

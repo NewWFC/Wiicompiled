@@ -479,11 +479,20 @@ inline double PPC_PsMulNoNiInline(double lhs, double rhs)
     return PpcM128ToPsInline(_mm_mul_ps(PpcPsToM128Inline(lhs), PpcPsToM128Inline(rhs)));
 }
 
-// The paired madd family lowers to one hardware FMA. Semantics match the scalar lanes exactly: a
-// single fused rounding per lane (std::fma(float) == vfmaddps per lane), and
-// the negate-unless-NaN behavior of the nmadd/nmsub forms is expressed with
-// PpcNegateNonNanLanesInline. NI flushing is handled by MXCSR (see
-// MkwApplyHostNiMode), so the NI and NoNi entry points are identical here.
+// The paired madd family lowers to one hardware FMA when the target has one (feature 'fma',
+// implied by x86-64-v3 - see MKW_CPU_BASELINE). Semantics match the scalar lanes exactly: a single
+// fused rounding per lane (std::fma(float) == vfmaddps per lane), and the negate-unless-NaN
+// behavior of the nmadd/nmsub forms is expressed with PpcNegateNonNanLanesInline. NI flushing is
+// handled by MXCSR (see MkwApplyHostNiMode), so the NI and NoNi entry points are identical here.
+//
+// __FMA__ is not implied by the x86-64-v2 compatibility baseline, so that build falls back to
+// std::fma() applied per lane instead of the vectorized intrinsic below. std::fma is required by
+// the C++ standard to behave as a single correctly-rounded operation regardless of hardware
+// support (falling back to a software-emulated fused multiply-add when there is no FMA unit), so
+// this preserves the exact single-rounding semantics real PPC hardware has - it is simply slower
+// without a native FMA unit, the expected cost of the compatibility build.
+
+#if defined(__FMA__)
 
 inline double PPC_PsMsubInline(double multiplicand, double multiplier, double subtractor)
 {
@@ -491,20 +500,10 @@ inline double PPC_PsMsubInline(double multiplicand, double multiplier, double su
         PpcPsToM128Inline(multiplicand), PpcPsToM128Inline(multiplier), PpcPsToM128Inline(subtractor)));
 }
 
-inline double PPC_PsMsubNoNiInline(double multiplicand, double multiplier, double subtractor)
-{
-    return PPC_PsMsubInline(multiplicand, multiplier, subtractor);
-}
-
 inline double PPC_PsMaddInline(double multiplicand, double multiplier, double addend)
 {
     return PpcM128ToPsInline(_mm_fmadd_ps(
         PpcPsToM128Inline(multiplicand), PpcPsToM128Inline(multiplier), PpcPsToM128Inline(addend)));
-}
-
-inline double PPC_PsMaddNoNiInline(double multiplicand, double multiplier, double addend)
-{
-    return PPC_PsMaddInline(multiplicand, multiplier, addend);
 }
 
 inline double PPC_PsMadds0Inline(double multiplicand, double multiplier, double addend)
@@ -525,15 +524,82 @@ inline double PPC_PsNmsubInline(double multiplicand, double multiplier, double s
         PpcPsToM128Inline(multiplicand), PpcPsToM128Inline(multiplier), PpcPsToM128Inline(subtractor))));
 }
 
-inline double PPC_PsNmsubNoNiInline(double multiplicand, double multiplier, double subtractor)
-{
-    return PPC_PsNmsubInline(multiplicand, multiplier, subtractor);
-}
-
 inline double PPC_PsNmaddInline(double multiplicand, double multiplier, double addend)
 {
     return PpcM128ToPsInline(PpcNegateNonNanLanesInline(_mm_fmadd_ps(
         PpcPsToM128Inline(multiplicand), PpcPsToM128Inline(multiplier), PpcPsToM128Inline(addend))));
+}
+
+#else  // !__FMA__
+
+inline float PpcNegateNonNanScalarInline(float value)
+{
+    return std::isnan(value) ? value : -value;
+}
+
+inline double PPC_PsMsubInline(double multiplicand, double multiplier, double subtractor)
+{
+    return PpcPackPairedInline(
+        std::fma(PpcGetPs0Inline(multiplicand), PpcGetPs0Inline(multiplier), -PpcGetPs0Inline(subtractor)),
+        std::fma(PpcGetPs1Inline(multiplicand), PpcGetPs1Inline(multiplier), -PpcGetPs1Inline(subtractor)));
+}
+
+inline double PPC_PsMaddInline(double multiplicand, double multiplier, double addend)
+{
+    return PpcPackPairedInline(
+        std::fma(PpcGetPs0Inline(multiplicand), PpcGetPs0Inline(multiplier), PpcGetPs0Inline(addend)),
+        std::fma(PpcGetPs1Inline(multiplicand), PpcGetPs1Inline(multiplier), PpcGetPs1Inline(addend)));
+}
+
+inline double PPC_PsMadds0Inline(double multiplicand, double multiplier, double addend)
+{
+    const float multiplier0 = PpcGetPs0Inline(multiplier);
+    return PpcPackPairedInline(
+        std::fma(PpcGetPs0Inline(multiplicand), multiplier0, PpcGetPs0Inline(addend)),
+        std::fma(PpcGetPs1Inline(multiplicand), multiplier0, PpcGetPs1Inline(addend)));
+}
+
+inline double PPC_PsMadds1Inline(double multiplicand, double multiplier, double addend)
+{
+    const float multiplier1 = PpcGetPs1Inline(multiplier);
+    return PpcPackPairedInline(
+        std::fma(PpcGetPs0Inline(multiplicand), multiplier1, PpcGetPs0Inline(addend)),
+        std::fma(PpcGetPs1Inline(multiplicand), multiplier1, PpcGetPs1Inline(addend)));
+}
+
+inline double PPC_PsNmsubInline(double multiplicand, double multiplier, double subtractor)
+{
+    return PpcPackPairedInline(
+        PpcNegateNonNanScalarInline(std::fma(PpcGetPs0Inline(multiplicand), PpcGetPs0Inline(multiplier),
+            -PpcGetPs0Inline(subtractor))),
+        PpcNegateNonNanScalarInline(std::fma(PpcGetPs1Inline(multiplicand), PpcGetPs1Inline(multiplier),
+            -PpcGetPs1Inline(subtractor))));
+}
+
+inline double PPC_PsNmaddInline(double multiplicand, double multiplier, double addend)
+{
+    return PpcPackPairedInline(
+        PpcNegateNonNanScalarInline(std::fma(PpcGetPs0Inline(multiplicand), PpcGetPs0Inline(multiplier),
+            PpcGetPs0Inline(addend))),
+        PpcNegateNonNanScalarInline(std::fma(PpcGetPs1Inline(multiplicand), PpcGetPs1Inline(multiplier),
+            PpcGetPs1Inline(addend))));
+}
+
+#endif  // __FMA__
+
+inline double PPC_PsMsubNoNiInline(double multiplicand, double multiplier, double subtractor)
+{
+    return PPC_PsMsubInline(multiplicand, multiplier, subtractor);
+}
+
+inline double PPC_PsMaddNoNiInline(double multiplicand, double multiplier, double addend)
+{
+    return PPC_PsMaddInline(multiplicand, multiplier, addend);
+}
+
+inline double PPC_PsNmsubNoNiInline(double multiplicand, double multiplier, double subtractor)
+{
+    return PPC_PsNmsubInline(multiplicand, multiplier, subtractor);
 }
 
 inline double PPC_PsMuls0Inline(double aValue, double cValue)

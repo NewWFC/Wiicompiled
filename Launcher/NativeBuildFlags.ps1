@@ -16,10 +16,25 @@ function Assert-Directory([string]$Path, [string]$Description) {
 
 function Get-MkwFileSha256([string]$Path) {
     <#
-    Lower-case SHA-256 of one file. -LiteralPath is required: Get-FileHash treats a positional
-    path as a wildcard, so an install directory containing [, ] or * would hash the wrong file.
+    Lower-case SHA-256 of one file. Uses System.Security.Cryptography directly rather than
+    Get-FileHash: LocalBuildService.cs runs LocalBuild.ps1 through the System32 WindowsPowerShell
+    v1.0 host rather than pwsh, and Get-FileHash lives in the Microsoft.PowerShell.Utility module -
+    present on a normal desktop Windows install, but not guaranteed on every SKU (embedded/IoT
+    editions can ship Windows PowerShell without it). The .NET crypto types used here are part of
+    the engine itself, not a module, so they need no autoload and cannot go missing independently
+    of PowerShell working at all. [Path]::GetFullPath resolves the same way -LiteralPath would
+    (no wildcard interpretation), so an install directory containing [, ] or * still hashes the
+    right file.
     #>
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    $resolved = [IO.Path]::GetFullPath($Path)
+    $stream = [IO.File]::OpenRead($resolved)
+    try {
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $bytes = $sha.ComputeHash($stream)
+        } finally { $sha.Dispose() }
+    } finally { $stream.Dispose() }
+    return (($bytes | ForEach-Object { $_.ToString('x2') }) -join '')
 }
 
 function Get-MkwToolchainPath([string]$ToolchainRoot) {

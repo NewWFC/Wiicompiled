@@ -8,8 +8,15 @@ internal sealed class InstallerEngine
 
     public async Task InstallAsync(InstallOptions options, CancellationToken cancellationToken = default)
     {
+        // Resolved once for the whole operation: every product this install builds or rebuilds
+        // (initial compile, "same toolkit" reconciliation, a later repair sharing this same
+        // resolution) must target the same baseline within one run.
+        var cpuBaseline = options.CpuBaselineOverride ?? CpuBaselineDetector.DetectHost();
         var installDirectory = Path.GetFullPath(options.InstallDirectory);
         ValidateInstallDirectory(installDirectory);
+        if (options.EnableLegacyWfc && options.HasRetroRewind)
+            throw new InvalidOperationException(
+                "NewWFC-Legacy cannot be combined with a Retro Rewind install in this release.");
 
         InputValidation.ValidateExtension(options.GamePath);
         var parent = Directory.GetParent(installDirectory)?.FullName
@@ -108,7 +115,8 @@ internal sealed class InstallerEngine
 
             var reconciliation = await ReconcileSameToolkitAsync(existing, retroCompileInputs,
                 canonicalRetroRoot, options.RetroWfcPayloadMode, Path.Combine(staging, "repair"),
-                manifest.ExpectedDolSha256, manifest.ExpectedRelSha256, cancellationToken);
+                manifest.ExpectedDolSha256, manifest.ExpectedRelSha256, cancellationToken,
+                cpuBaseline, options.EnableLegacyWfc);
             var remainingCancellation = reconciliation.PublicationCommitted
                 ? CancellationToken.None
                 : cancellationToken;
@@ -159,7 +167,7 @@ internal sealed class InstallerEngine
 
         await PublishToolkitAndReconcileProductsAsync(existing, staging, workspace, manifest,
             previousState, options, canonicalRetroRoot, retroCompileInputs,
-            publishGameAssets: reusableGameAssets is null, cancellationToken);
+            publishGameAssets: reusableGameAssets is null, cpuBaseline, cancellationToken);
     }
 
 
@@ -184,7 +192,7 @@ internal sealed class InstallerEngine
         string stagedWorkspace, PayloadManifest manifest, InstallState? previousState,
         InstallOptions options, string? canonicalRetroRoot,
         RetroRewindCompileInputs? retroCompileInputs,
-        bool publishGameAssets, CancellationToken cancellationToken)
+        bool publishGameAssets, CpuBaseline cpuBaseline, CancellationToken cancellationToken)
     {
         var installDirectory = existing.Root;
 
@@ -219,7 +227,8 @@ internal sealed class InstallerEngine
 
         var reconciliation = await ReconcileSameToolkitAsync(existing, retroCompileInputs,
             canonicalRetroRoot, options.RetroWfcPayloadMode, repairScratch: null,
-            manifest.ExpectedDolSha256, manifest.ExpectedRelSha256, cancellationToken);
+            manifest.ExpectedDolSha256, manifest.ExpectedRelSha256, cancellationToken,
+            cpuBaseline, options.EnableLegacyWfc);
         EnsureReconciliationCurrent(existing, manifest.ToolkitFingerprint, retroCompileInputs,
             manifest.ExpectedDolSha256, manifest.ExpectedRelSha256,
             reconciliation.CachedRetroWfcPayloadMatches);
@@ -228,20 +237,23 @@ internal sealed class InstallerEngine
     private Task<ProductRepairService.ReconciliationResult> ReconcileSameToolkitAsync(Installation existing,
         RetroRewindCompileInputs? retroCompileInputs, string? canonicalRetroRoot,
         RetroWfcPayloadMode payloadMode, string? repairScratch, string expectedDolSha256,
-        string expectedRelSha256, CancellationToken cancellationToken)
+        string expectedRelSha256, CancellationToken cancellationToken, CpuBaseline cpuBaseline,
+        bool enableLegacyWfc = false)
     {
         var repair = new ProductRepairService(existing, _reporter);
-        var options = new ProductRepairService.ReconcileOptions
+        var reconcileOptions = new ProductRepairService.ReconcileOptions
         {
             ScratchRoot = repairScratch,
             ExpectedDolSha256 = expectedDolSha256,
             ExpectedRelSha256 = expectedRelSha256,
-            CanonicalRetroRewindRoot = canonicalRetroRoot
+            CanonicalRetroRewindRoot = canonicalRetroRoot,
+            EnableLegacyWfc = enableLegacyWfc,
+            CpuBaseline = cpuBaseline
         };
 
         return retroCompileInputs is null
-            ? repair.RepairBaseAsync(options, cancellationToken)
-            : repair.RepairRetroAsync(retroCompileInputs, payloadMode, options, cancellationToken);
+            ? repair.RepairBaseAsync(reconcileOptions, cancellationToken)
+            : repair.RepairRetroAsync(retroCompileInputs, payloadMode, reconcileOptions, cancellationToken);
     }
 
     private static void EnsureReconciliationCurrent(Installation installation, string toolkitFingerprint,

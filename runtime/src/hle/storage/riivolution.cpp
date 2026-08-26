@@ -82,8 +82,15 @@ std::string RiivoComparablePath(const fs::path& path) {
     return text;
 }
 
+// matchByFilename (My Stuff slots only): builds a synthetic single-mapping PatchSet up front
+// instead of leaving `patches` as nullopt, so ScanOverlayRoot (dvd.cpp) skips its "no Riivolution
+// XML - disc-shaped overlay" fallback entirely and goes straight to ApplyFolderByNameMapping. A
+// disc-shaped overlay (the default, used by overlay_roots/Retro Rewind) needs a file at the exact
+// same relative path as the disc file it replaces; a My Stuff slot instead matches by filename
+// alone, wherever in the slot folder that file happens to sit - see the Config.toml template's
+// [my_stuff] comment for the player-facing version of this.
 void RiivoAddRoot(std::vector<RuntimeRiivolution::Overlay>& overlays, fs::path root,
-                  const char* source) {
+                  const char* source, bool matchByFilename = false) {
     std::error_code ec;
     if (!fs::is_directory(root, ec)) {
         return;
@@ -105,11 +112,28 @@ void RiivoAddRoot(std::vector<RuntimeRiivolution::Overlay>& overlays, fs::path r
 
     RT_LOG(RT_TAG_RIIVOLUTION) << "overlay root (" << (source ? source : "unknown")
               << "): " << normalized.string() << std::endl;
-    overlays.push_back({std::move(normalized), std::nullopt});
+
+    std::optional<RuntimeRiivolution::PatchSet> patches;
+    if (matchByFilename) {
+        RuntimeRiivolution::PatchSet set;
+        set.mappings.push_back({RuntimeRiivolution::Mapping::Kind::FolderByName, /*discPath=*/"",
+                                 normalized, /*recursive=*/true, /*create=*/false});
+        patches = std::move(set);
+    }
+    overlays.push_back({std::move(normalized), std::move(patches)});
 }
 
 std::vector<RuntimeRiivolution::Overlay> RiivoDiscoverRoots() {
     std::vector<RuntimeRiivolution::Overlay> overlays;
+
+    // My Stuff slots always come first, so they always outrank overlay_roots, Retro Rewind's own
+    // pack, and the base disc - a folder the player explicitly curated in SimpleUI should never
+    // lose to anything else. Already in priority order (index 0 highest); matched by filename, not
+    // by mirroring the disc's folder layout - see RiivoAddRoot's matchByFilename.
+    for (const auto& root : RuntimeConfigFile::MyStuffRoots()) {
+        RiivoAddRoot(overlays, RuntimeNandPath::ResolveConfiguredPath(root), "My Stuff slot",
+                     /*matchByFilename=*/true);
+    }
 
     // Discovery order is precedence order: DVDInit applies the roots in
     // reverse, so an explicitly configured root (command line first, then
@@ -332,7 +356,13 @@ std::optional<RuntimeRiivolution::PatchSet> RiivoLoadPatchSet(const fs::path& ov
 void RiivoInitialize() {
     g_riivoState.overlays = RiivoDiscoverRoots();
     for (auto& overlay : g_riivoState.overlays) {
-        overlay.patches = RiivoLoadPatchSet(overlay.root, g_riivoState);
+        // A My Stuff slot's synthetic FolderByName patch set (RiivoAddRoot's matchByFilename) is
+        // already final - it never has a Riivolution XML to load, so loading unconditionally here
+        // would just overwrite it with nullopt and silently downgrade it to a disc-shaped overlay
+        // (exact folder-path matching) instead of the by-filename matching it's supposed to have.
+        if (!overlay.patches) {
+            overlay.patches = RiivoLoadPatchSet(overlay.root, g_riivoState);
+        }
     }
 }
 

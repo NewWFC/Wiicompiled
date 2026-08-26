@@ -16,7 +16,7 @@ internal static class InputValidation
         [".iso", ".gcm", ".gcz", ".ciso", ".wbfs", ".wia", ".rvz"],
         StringComparer.OrdinalIgnoreCase);
 
-    public const string CurrentRetroWfcPayloadUri = "http://nas.play.rwfc.net/payload?g=RMCPD00";
+    public const string CurrentRetroWfcPayloadUri = "http://nas.newwfc.xyz/payload?g=RMCPD00";
     private static readonly string RetroWfcOfflinePayloadFile =
         Path.Combine("binary", "payload.RMCPD00.bin");
 

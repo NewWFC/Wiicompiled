@@ -60,6 +60,21 @@ if (functionMap is not null)
 }
 var root = project?.WorkspaceRoot ?? Directory.GetCurrentDirectory();
 var preferCachedInputs = HasFlag(tail, "--prefer-cached-inputs");
+// Patches whose address didn't fall inside any DOL section, set by LoadDol() (which always runs
+// first - every consumer touches dolFile.Value before relFile.Value/BuildRelImageWithPatches) and
+// consumed by BuildRelImageWithPatches; whatever neither claims is an invalid address.
+IReadOnlyList<DolCodePatcher.Patch> codePatchesNotInDol = Array.Empty<DolCodePatcher.Patch>();
+// EXPERIMENT (temporary): relocated into the conventional low-memory "Gecko hole", inside the
+// already-registered MEM1 region rather than its own dedicated BASE_CHEAT_SCRATCH region (see
+// runtime/src/memory.cpp) - sidesteps the 64 KiB region-base alignment requirement entirely, since
+// no new region needs registering. Revert: AsmHookScratchBase = 0x81A00000u, AsmHookScratchCapacity
+// = 0x100000u, and re-add the BASE_CHEAT_SCRATCH region in memory.cpp, if this doesn't help.
+// Declared before dolFile/image below: LoadDol/LoadImage's delegate conversions close over
+// asmHookScratchLayout, which C# top-level definite-assignment requires to already be assigned at
+// that point, not merely by the time the delegate is actually invoked.
+const uint AsmHookScratchBase = 0x80002000u;
+const uint AsmHookScratchCapacity = 0x1800u;
+var asmHookScratchLayout = new Lazy<AsmHookScratchLayout>(BuildAsmHookScratchLayout);
 var dolFile = new Lazy<DolFile>(LoadDol);
 var relFile = new Lazy<RelFile?>(LoadRel);
 var image = new Lazy<ProgramImage>(LoadImage);
@@ -67,7 +82,9 @@ var canonicalIrStore = new CanonicalIrStore();
 // Hoisted out of the translator factory so the base pipeline can prewarm the
 // recursive ABI cache in one stable pass, exactly like translate-mod does.
 var inferredGuestAbi = new Lazy<InferredGuestFunctionAbiProvider>(() =>
-    new InferredGuestFunctionAbiProvider(image.Value, canonicalIrStore));
+    new InferredGuestFunctionAbiProvider(image.Value, canonicalIrStore,
+        tolerateDecodeFailureFrom: asmHookScratchLayout.Value.TotalBytes > 0 ? AsmHookScratchBase : null,
+        tolerateDecodeFailureTo: asmHookScratchLayout.Value.TotalBytes > 0 ? AsmHookScratchBase + AsmHookScratchCapacity : null));
 var runtimeNativeIndex = new Lazy<RuntimeNativeIndex>(() =>
     RuntimeNativeIndexBuilder.Build(RequireProject().Runtime.NativeRegistrationRoot));
 // Void-stub signatures are only trusted as declared guest ABIs when the stub
@@ -136,7 +153,24 @@ TranslationOptions WithProjectFrontEndPolicy(
         // Splicing a body whose runtime winner is a native registration, a
         // dropped translation or a Kamek overlay would silently keep executing
         // the original bytes.
-        LeafInliningBlockedTargets = leafInliningBlockedTargets.Value
+        LeafInliningBlockedTargets = leafInliningBlockedTargets.Value,
+        // A C2 hook's scratch space (see BuildAsmHookScratchLayout) lives past the end of the
+        // declared memory window - which, for a function whose own entry point sits near the start
+        // of that window, can be almost the whole window's size away, since scratch has to be
+        // somewhere the original game could never legitimately reach on its own. The default 64 KiB
+        // per-function decode budget exists to catch runaway/misdecoded disassembly, not to bound a
+        // deliberate, single, known-good cross-image branch, so widen it (worst case: the whole
+        // declared window plus all scratch) for every function whenever this project has any C2
+        // hook at all, rather than trying to compute a tight per-function distance.
+        MaxBytes = asmHookScratchLayout.Value.Hooks.Count > 0
+            ? Math.Max(options.MaxBytes,
+                checked((int)(RequireProject().Memory.Size + asmHookScratchLayout.Value.TotalBytes + 0x10000)))
+            : options.MaxBytes,
+        // See PpcDisassembler.LooksUnrecognized's doc - only ever the scratch region, so this can
+        // only stop a crash that would otherwise happen inside a hand-written cheat's own
+        // deliberately-unreachable data, never change behavior for any real game address.
+        TolerateDecodeFailureFrom = asmHookScratchLayout.Value.TotalBytes > 0 ? AsmHookScratchBase : null,
+        TolerateDecodeFailureTo = asmHookScratchLayout.Value.TotalBytes > 0 ? AsmHookScratchBase + AsmHookScratchCapacity : null,
     };
 string? translateModInputCacheDirectory = null;
 string? translateModPublishedOutputDirectory = null;
@@ -160,7 +194,7 @@ return command switch
 {
     "help" or "--help" or "-h" or "-?" => ShowGlobalHelp(),
     "info" or "--info" or "--version" => RunInfo(),
-    "generate-data-init" => RunGenerateDataInit(),
+    "generate-data-init" => RunGenerateDataInit(tail),
     "translate-recursive" => RunTranslateRecursive(tail),
     "translate-mod" => RunTranslateMod(tail),
     "emit-build-shards" => RunEmitBuildShards(tail),
@@ -386,6 +420,15 @@ int RunTranslateRecursive(string[] argsTail)
         }
     }
     var pruneStale = HasFlag(argsTail, "--prune-stale");
+    // Diagnostic-only (see TranslationOptions.EmitPcTrace): makes ctx->pc accurate in a crash
+    // dump instead of permanently stale, at the cost of a store per guest instruction across the
+    // whole build. Never set for a normal compile.
+    var emitPcTrace = HasFlag(argsTail, "--trace-pc");
+    if (emitPcTrace)
+    {
+        Console.WriteLine("[translator] PC tracing enabled: every guest instruction will write its own " +
+                           "address into ctx->pc. This build is for crash diagnosis only - do not ship it.");
+    }
     var threadsOption = OptionValue(argsTail, "--threads");
     var maxThreads = threadsOption != null ? Math.Max(1, ParseInt(threadsOption)) : Math.Max(1, Environment.ProcessorCount);
     // Discovery batches: cheap front-end-only work items, so the batch is sized
@@ -682,7 +725,8 @@ int RunTranslateRecursive(string[] argsTail)
         {
             var options = WithProjectFrontEndPolicy(new TranslationOptions(
                 work.Name,
-                KnownFunctionEntryPoints: knownBaseFunctionEntryPoints),
+                KnownFunctionEntryPoints: knownBaseFunctionEntryPoints,
+                EmitPcTrace: emitPcTrace),
                 RequireProject().Translation);
             return translator.Value.Discover(work.Address, options);
         }
@@ -881,6 +925,35 @@ int RunTranslateRecursive(string[] argsTail)
                 nativeGuestEffects.Contracts);
             var guestAbiContracts = interproceduralGuestAbi.Contracts
                 .ToDictionary(static pair => pair.Key, static pair => pair.Value);
+            // A C2/D2 hook's auto-appended return branch (see AsmHookPlanner) targets
+            // hookAddress+4 via InvokeDirectCpu, which the codegen's register-residency path
+            // (ResolveDirectCallBoundarySync) treats exactly like any other direct call: sync only
+            // what the target's own analyzed ABI contract claims to read. But hookAddress+4 was
+            // never a real call boundary under normal translation - nothing calls into the middle
+            // of a function like that except this hook, so the interprocedural analysis never had a
+            // reason to prove every register a deep, transitively-called callee (here,
+            // Item::PlayerObj::UpdateParams, reached indirectly through the hooked function's own
+            // normal control flow) actually needs, such as a non-volatile register like r28 that is
+            // only ever set up by the function's *own* real callers, not by code resuming partway
+            // through it. Forcing RequiresCompleteContext makes every consumer of this contract -
+            // including ResolveDirectCallBoundarySync's residency optimization - fall back to a full
+            // sync (ResidencyBoundarySync.Full), the same safe behavior a hook's return branch
+            // already gets when it is emitted directly inside its own enclosing function rather than
+            // split into a separate one (e.g. because the hook body itself became a real C++
+            // function, as any C2 hook whose payload contains a bl does). The entry is kept, not
+            // removed - other passes index this dictionary directly for hookAddress+4's own
+            // compilation as a function in its own right, which a missing key would crash.
+            foreach (var hook in asmHookScratchLayout.Value.Hooks)
+            {
+                var returnAddress = hook.Hook.HookAddress + 4;
+                if (guestAbiContracts.TryGetValue(returnAddress, out var returnContract))
+                {
+                    guestAbiContracts[returnAddress] = returnContract with
+                    {
+                        BoundaryFlags = returnContract.BoundaryFlags | GuestCallBoundaryFlags.RequiresCompleteContext
+                    };
+                }
+            }
             var recursiveComponents = interproceduralGuestAbi.StronglyConnectedComponents
                 .Count(component => component.Count > 1 ||
                     guestAbiContracts[component[0]].DirectCallTargets.Contains(component[0]));
@@ -1091,7 +1164,12 @@ int RunTranslateRecursive(string[] argsTail)
                         StateFreeCallSymbols: stateFreeCallSymbols,
                         StateFreeCallSiteVariants: stateFreeCallSiteVariantsByCaller.GetValueOrDefault(address),
                          StateFreeEntryVariants: stateFreeEntryVariantsByTarget.GetValueOrDefault(address),
-                         ModOverridableCallTargets: modOverridableCallTargets),
+                         ModOverridableCallTargets: modOverridableCallTargets,
+                         // State-free bodies are checked to never touch CpuContext at all (that's
+                         // the point of the optimization) - ctx->pc writes would violate that
+                         // invariant, so trace only the ordinary (non-state-free) majority of
+                         // functions rather than disabling state-free selection wholesale.
+                         EmitPcTrace: emitPcTrace && !stateFreeAbiFunctions.Contains(address)),
                     residentPolicy,
                     address);
             }
@@ -2883,16 +2961,32 @@ int RunEmitBaseManifest(string[] argsTail)
     return 0;
 }
 
-int RunGenerateDataInit()
+int RunGenerateDataInit(string[] argsTail)
 {
     var loadedProject = RequireProject();
+    var enableLegacyWfc = HasFlag(argsTail, "--enable-legacy-wfc");
+    IReadOnlyList<NetworkDomainRewriter.DomainRewrite>? domainRewrites = null;
+    if (enableLegacyWfc)
+    {
+        if (loadedProject.LegacyWfc is not { } legacyWfc)
+        {
+            Console.Error.WriteLine(
+                "[translator] --enable-legacy-wfc was passed but the project has no legacy_wfc block.");
+            return 1;
+        }
+        domainRewrites = legacyWfc.RewriteHosts
+            .Select(host => new NetworkDomainRewriter.DomainRewrite(host, legacyWfc.Domain))
+            .ToArray();
+    }
     var output = loadedProject.Output.DataInitializer;
     var runtimeConfigOutput = loadedProject.Output.RuntimeConfig;
-    var dolPath = loadedProject.Inputs.Dol.Path;
     string? relPath = loadedProject.Inputs.Rel?.Path;
 
-    var dol = DolFile.Load(dolPath);
-    
+    // Shares LoadDol()/dolFile with every other command so a configured code_patches list is
+    // applied consistently - the embedded .text blob then matches what translate-recursive
+    // actually decoded and compiled, instead of the two silently disagreeing.
+    var dol = dolFile.Value;
+
     // Generate runtime configuration header with the manifest's SDA base pointers
     var (dataInitSda1Base, dataInitSda2Base) = loadedProject.RequireSdaBases();
     RuntimeConfigGenerator.GenerateConfigHeader(
@@ -2902,9 +2996,7 @@ int RunGenerateDataInit()
     RelImage? relImage = null;
     if (!string.IsNullOrWhiteSpace(relPath) && loadedProject.Inputs.Rel is { } configuredRel && File.Exists(relPath))
     {
-        relImage = RelFile.Load(relPath).BuildImage(
-            configuredRel.LoadAddress,
-            applyRelocations: true);
+        relImage = BuildRelImageWithPatches(RelFile.Load(relPath), configuredRel.LoadAddress);
     }
     
     // Generate the data section initializer
@@ -2913,12 +3005,41 @@ int RunGenerateDataInit()
     {
         Directory.CreateDirectory(outputDir);
     }
+    var scratchForDataInit = asmHookScratchLayout.Value;
+    List<(string Name, uint Address, byte[] Data)>? extraSections = null;
+    if (scratchForDataInit.TotalBytes > 0)
+    {
+        extraSections = new List<(string, uint, byte[])>();
+        foreach (var hook in scratchForDataInit.Hooks)
+        {
+            var bytes = new byte[hook.ScratchWords.Count * 4];
+            for (var i = 0; i < hook.ScratchWords.Count; i++)
+            {
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(
+                    bytes.AsSpan(i * 4, 4), hook.ScratchWords[i]);
+            }
+            extraSections.Add(($"c2_scratch_{hook.ScratchAddress:X8}", hook.ScratchAddress, bytes));
+        }
+        foreach (var block in scratchForDataInit.Blocks)
+        {
+            var bytes = new byte[block.Block.InstructionWords.Count * 4];
+            for (var i = 0; i < block.Block.InstructionWords.Count; i++)
+            {
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(
+                    bytes.AsSpan(i * 4, 4), block.Block.InstructionWords[i]);
+            }
+            extraSections.Add(($"c0_block_{block.Address:X8}", block.Address, bytes));
+        }
+    }
     DataSectionGenerator.Generate(
         dol,
         relImage,
         output,
         loadedProject.Identity.DisplayName,
-        relPath is null ? "rel_module" : Path.GetFileNameWithoutExtension(relPath));
+        relPath is null ? "rel_module" : Path.GetFileNameWithoutExtension(relPath),
+        blobReferenceDirectory: null,
+        domainRewrites: domainRewrites,
+        extraSections: extraSections);
     
     // Emit the guest symbol table for crash-report symbolization. The function
     // map is already the project's authoritative name source; the runtime only
@@ -3651,7 +3772,10 @@ static (string? Positional, CommandOption[] Options)? CommandSpec(string command
 {
     "info" or "--info" or "--version" =>
         (null, Array.Empty<CommandOption>()),
-    "generate-data-init" => (null, Array.Empty<CommandOption>()),
+    "generate-data-init" => (null, new CommandOption[]
+    {
+        new("--enable-legacy-wfc")
+    }),
     "translate-recursive" => ("<start_addr>", new CommandOption[]
     {
         new("--outdir", "path"),
@@ -3659,7 +3783,8 @@ static (string? Positional, CommandOption[] Options)? CommandSpec(string command
         new("--production-source-bundle", "path"),
         new("--threads", "N"),
         new("--no-function-files"),
-        new("--prune-stale")
+        new("--prune-stale"),
+        new("--trace-pc")
     }),
     "translate-mod" => (null, new CommandOption[]
     {
@@ -3793,13 +3918,153 @@ ProgramImage LoadImage()
         $"[translator] SDA bases: r13 (_SDA_BASE_) 0x{sda1Base:X8}, r2 (_SDA2_BASE_) 0x{sda2Base:X8} " +
         $"(entry 0x{dol.EntryPoint:X8}).");
 
-    var relImage = relFile.Value?.BuildImage(loadedProject.Inputs.Rel!.LoadAddress);
-    return new ProgramImageBuilder().Build(dol, relImage, loadedProject.Memory.Base, loadedProject.Memory.Size);
+    var relImage = relFile.Value is { } rel
+        ? BuildRelImageWithPatches(rel, loadedProject.Inputs.Rel!.LoadAddress)
+        : null;
+
+    var scratch = asmHookScratchLayout.Value;
+    // The array must reach far enough to hold a write at AsmHookScratchBase. Normally that sits past
+    // a gap above the project's own declared window (Memory.Base + Memory.Size), making it the outer
+    // bound - but not always (EXPERIMENT: AsmHookScratchBase currently sits *before* most of the
+    // game image while testing a relocated scratch address), so take whichever extent is larger
+    // rather than assuming scratch is always the outer bound.
+    // EXPERIMENT (temporary): also floor this at the historical ~27MiB extent (0x81A00000 +
+    // 0x100000 scratch capacity, minus Memory.Base) so relocating AsmHookScratchBase closer to
+    // Memory.Base can't shrink the built image below what it's always been - isolating whether a
+    // smaller ramSize was itself responsible for a discovery-order translation failure seen only
+    // after relocating scratch into the Gecko hole.
+    const int HistoricalMinRamSize = 0x1B00000;
+    var ramSize = scratch.TotalBytes > 0
+        ? Math.Max(HistoricalMinRamSize, Math.Max(loadedProject.Memory.Size,
+            checked((int)(AsmHookScratchBase - loadedProject.Memory.Base + scratch.TotalBytes))))
+        : loadedProject.Memory.Size;
+    var builtImage = new ProgramImageBuilder().Build(dol, relImage, loadedProject.Memory.Base, ramSize);
+
+    if (scratch.TotalBytes > 0)
+    {
+        foreach (var hook in scratch.Hooks)
+        {
+            WriteWordsToImage(builtImage, hook.ScratchAddress, hook.ScratchWords);
+        }
+        foreach (var block in scratch.Blocks)
+        {
+            WriteWordsToImage(builtImage, block.Address, block.Block.InstructionWords);
+        }
+        Console.WriteLine(
+            $"[translator] Placed {scratch.Hooks.Count} C2 hook scratch region(s) and " +
+            $"{scratch.Blocks.Count} C0 block(s), {scratch.TotalBytes:N0} byte(s) total, starting at " +
+            $"0x{AsmHookScratchBase:X8}.");
+    }
+
+    return builtImage;
+}
+
+void WriteWordsToImage(ProgramImage image, uint address, IReadOnlyList<uint> words)
+{
+    var offset = image.GetOffset(address, checked(words.Count * 4));
+    for (var i = 0; i < words.Count; i++)
+    {
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(
+            image.Memory.AsSpan(offset + i * 4, 4), words[i]);
+    }
+}
+
+/// <summary>
+/// Assigns every C2 hook and C0 block a real, stable guest address inside BASE_CHEAT_SCRATCH
+/// (runtime/src/memory.cpp) - a small region the original game could never legitimately reach,
+/// since its own compiled arena/heap sizing was fixed at Nintendo's compile time, long before this
+/// address range existed. Since this is a static recompile rather than real console hardware,
+/// giving cheats their own reserved window is simply a runtime-mapped region and a few more bytes
+/// embedded in the compiled binary - there is no physical MEM1 limit to respect. Purely
+/// deterministic address/size math, independent of DOL/REL loading order, so LoadDol can safely
+/// consume its HookWordValue patches before LoadImage places ScratchWords.
+/// </summary>
+AsmHookScratchLayout BuildAsmHookScratchLayout()
+{
+    var project = RequireProject();
+    var cursor = AsmHookScratchBase;
+
+    var hooks = new List<AsmHookScratchPlacement>();
+    foreach (var hook in project.CodePatches.Hooks)
+    {
+        var (hookWordValue, scratchWords) = AsmHookPlanner.BuildHookAndScratch(hook, cursor);
+        hooks.Add(new AsmHookScratchPlacement(hook, cursor, hookWordValue, scratchWords));
+        cursor = checked(cursor + (uint)(scratchWords.Count * 4));
+    }
+
+    var blocks = new List<AsmBlockScratchPlacement>();
+    foreach (var block in project.CodePatches.Blocks)
+    {
+        blocks.Add(new AsmBlockScratchPlacement(block, cursor));
+        cursor = checked(cursor + (uint)(block.InstructionWords.Count * 4));
+    }
+
+    var totalBytes = cursor - AsmHookScratchBase;
+    if (totalBytes > AsmHookScratchCapacity)
+    {
+        throw new InvalidDataException(
+            $"C2/C0 cheat scratch needs {totalBytes:N0} byte(s), which exceeds the " +
+            $"{AsmHookScratchCapacity:N0}-byte BASE_CHEAT_SCRATCH region reserved for it " +
+            "(runtime/src/memory.cpp) - remove some cheats, or enlarge that region and this " +
+            "constant together.");
+    }
+    return new AsmHookScratchLayout(hooks, blocks, totalBytes);
 }
 
 DolFile LoadDol()
 {
-    return DolFile.Load(RequireProject().Inputs.Dol.Path);
+    var project = RequireProject();
+    var hookWordPatches = asmHookScratchLayout.Value.Hooks
+        .Select(h => new DolCodePatcher.Patch(h.Hook.HookAddress, h.HookWordValue, 4, h.Hook.Source))
+        .ToList();
+    var codePatches = project.CodePatches.BasicWrites.Concat(hookWordPatches).ToList();
+    if (codePatches.Count == 0)
+    {
+        return DolFile.Load(project.Inputs.Dol.Path);
+    }
+
+    var probeDol = DolFile.Load(project.Inputs.Dol.Path);
+    var patchedBytes = DolCodePatcher.ApplyPatches(project.Inputs.Dol.Path, probeDol, codePatches, out var appliedToDol);
+    if (appliedToDol.Count > 0)
+    {
+        Console.WriteLine($"[translator] Applied {appliedToDol.Count} code patch(es) to the DOL before translation.");
+    }
+    codePatchesNotInDol = codePatches.Where(p => !appliedToDol.Contains(p)).ToArray();
+
+    using var patchedStream = new MemoryStream(patchedBytes);
+    return DolFile.Load(patchedStream);
+}
+
+/// <summary>
+/// Builds the REL image (with relocations applied, as every caller needs) and applies whatever
+/// code_patches LoadDol() didn't claim. Throws if any patch matches neither file - almost always a
+/// typo'd address, and a silent no-op here would be far more confusing than a build failure.
+/// </summary>
+RelImage? BuildRelImageWithPatches(RelFile? rel, uint loadAddress)
+{
+    if (rel is null)
+    {
+        return null;
+    }
+    var image = rel.BuildImage(loadAddress);
+    if (codePatchesNotInDol.Count == 0)
+    {
+        return image;
+    }
+
+    RelCodePatcher.ApplyPatches(rel, image, codePatchesNotInDol, out var appliedToRel);
+    if (appliedToRel.Count > 0)
+    {
+        Console.WriteLine($"[translator] Applied {appliedToRel.Count} code patch(es) to the REL before translation.");
+    }
+    var unmatched = codePatchesNotInDol.Where(p => !appliedToRel.Contains(p)).ToArray();
+    if (unmatched.Length > 0)
+    {
+        throw new InvalidDataException(
+            "Code patch(es) matched neither the DOL nor the REL: " +
+            string.Join(", ", unmatched.Select(p => $"'{p.Source}' (0x{p.Address:X8})")));
+    }
+    return image;
 }
 
 RelFile? LoadRel()
@@ -4060,5 +4325,21 @@ sealed record ResolvedDispatchEntry(
     uint NonvolatileFprWriteMask,
     bool MustRemainDynamicallyDispatchable,
     string SourceFile);
+
+/// <summary>One C2 hook's assigned scratch placement: ScratchAddress is where ScratchWords (the
+/// hook's own instructions, plus an auto-generated return branch unless it already ends in one -
+/// see AsmHookPlanner) get written, and HookWordValue is the branch that replaces the single
+/// original word at Hook.HookAddress.</summary>
+sealed record AsmHookScratchPlacement(AsmHookPatch Hook, uint ScratchAddress, uint HookWordValue, IReadOnlyList<uint> ScratchWords);
+
+/// <summary>One C0 block's assigned placement - just an address, since (unlike a hook) nothing in
+/// any existing function needs to change: a C0 block is a free-standing routine nothing in guest
+/// code ever calls.</summary>
+sealed record AsmBlockScratchPlacement(AsmBlockPatch Block, uint Address);
+
+sealed record AsmHookScratchLayout(
+    IReadOnlyList<AsmHookScratchPlacement> Hooks,
+    IReadOnlyList<AsmBlockScratchPlacement> Blocks,
+    uint TotalBytes);
 
 

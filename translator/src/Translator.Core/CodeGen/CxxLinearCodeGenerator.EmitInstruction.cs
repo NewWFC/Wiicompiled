@@ -27,7 +27,8 @@ public sealed partial class CxxLinearCodeGenerator
         IReadOnlyDictionary<uint, GuestAbiContract> stateFreeAbiContracts,
         IReadOnlyDictionary<uint, string> stateFreeCallSymbols,
         IReadOnlyDictionary<GuestStateFreeCallSiteKey, GuestStateFreeCallVariant> stateFreeCallSiteVariants,
-        IReadOnlySet<uint> modOverridableCallTargets)
+        IReadOnlySet<uint> modOverridableCallTargets,
+        bool emitPcTrace = false)
     {
         if (ins is IrPhi)
         {
@@ -527,6 +528,20 @@ public sealed partial class CxxLinearCodeGenerator
                 break;
             case IrTracePpc trace:
                 {
+                    // See TranslationOptions.EmitPcTrace - opt-in only, since this is a store per
+                    // guest instruction across the whole build. Makes the crash dump's ctx->pc
+                    // field (already printed there) accurate instead of permanently stale. Also
+                    // flushes every register this function has ever written, for the same reason:
+                    // without it, a crash dump's ctx->gpr[]/fpr[] only reflect whatever was last
+                    // synced at a call boundary, not the live value a residency-cached local holds
+                    // at the point of the fault - register forensics on an untraced build can be
+                    // actively misleading (a register the dump shows as X may already have been Y
+                    // for several instructions by the time the crash actually happened).
+                    if (emitPcTrace)
+                    {
+                        sb.AppendLine($"{pad}ctx->pc = 0x{trace.Address:X8}u;");
+                        AppendFlush(sb, pad);
+                    }
                 }
                 break;
             case IrUndefined undef:

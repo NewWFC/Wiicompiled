@@ -22,9 +22,11 @@ internal sealed class LocalBuildService
     /// </summary>
     public async Task BuildAsync(string installStaging, BuildProfile profile, string outputDirectory,
         RetroWfcPayloadMode retroWfcPayloadMode, string? retroWfcOfflinePayloadDirectory,
-        CancellationToken cancellationToken, ToolkitFingerprintComponents? toolkitComponents = null,
+        CancellationToken cancellationToken, CpuBaseline cpuBaseline,
+        ToolkitFingerprintComponents? toolkitComponents = null,
         bool forceCleanBuild = false, BuildProgressWindow? progress = null,
-        string? retroRewindPackageDirectory = null, string? baseOutputDirectory = null)
+        string? retroRewindPackageDirectory = null, string? baseOutputDirectory = null,
+        bool enableLegacyWfc = false)
     {
         var workspace = InstalledLayout.Workspace(installStaging);
         var toolkit = InstalledLayout.Toolkit(installStaging);
@@ -38,6 +40,8 @@ internal sealed class LocalBuildService
             throw new ArgumentException("The Retro Rewind build must select or explicitly skip the Retro-WFC payload.");
         if (retroRewindPackageDirectory is not null && !buildsRetro)
             throw new ArgumentException("Only Retro Rewind can select an explicit package snapshot.");
+        if (enableLegacyWfc && profile != BuildProfile.Base)
+            throw new ArgumentException("NewWFC-Legacy is valid only for a base-only build.");
         if ((profile == BuildProfile.Both) != (baseOutputDirectory is not null))
             throw new ArgumentException("A combined build takes exactly one base output directory.");
         if (retroRewindPackageDirectory is not null)
@@ -57,7 +61,8 @@ internal sealed class LocalBuildService
                 BuildProfile.RetroRewind => "retro-rewind",
                 _ => "both"
             },
-            "-OutputDirectory", outputDirectory
+            "-OutputDirectory", outputDirectory,
+            "-CpuBaseline", cpuBaseline.ToFlag()
         };
         if (baseOutputDirectory is not null)
         {
@@ -76,6 +81,14 @@ internal sealed class LocalBuildService
         }
         if (forceCleanBuild)
             arguments.Add("-ForceCleanBuild");
+#if DEBUG
+        // A Debug build of this host always traces: every lowered guest instruction writes its own
+        // address into ctx->pc, so a crash report shows exactly which instruction faulted instead
+        // of an approximate stack-scan guess (see Translator.Cli's --trace-pc / LocalBuild.ps1's
+        // -EmitPcTrace). Compiled out entirely in Release, so the real, distributed installer never
+        // carries this branch - it only ever runs from a Debug-published Setup.exe.
+        arguments.Add("-EmitPcTrace");
+#endif
         if (retroRewindPackageDirectory is not null)
         {
             arguments.Add("-RetroRewindPackageDirectory");
@@ -91,6 +104,10 @@ internal sealed class LocalBuildService
         else if (retroWfcPayloadMode == RetroWfcPayloadMode.Skipped)
         {
             arguments.Add("-SkipRetroWfcPayload");
+        }
+        if (enableLegacyWfc)
+        {
+            arguments.Add("-EnableLegacyWfc");
         }
         // Scrubs the ambient VS environment so the bundled clang-mingw toolchain is the only one visible.
         // The actual search path is set by LocalBuild.ps1's one canonical definition (Get-MkwToolchainPath,
@@ -143,13 +160,22 @@ internal sealed class LocalBuildService
     public static void WriteFingerprint(string outputDirectory, BuildProfile profile, string toolkitFingerprint,
         string dolSha256, string relSha256, string codePulSha256, RetroWfcPayloadMode retroWfcPayloadMode,
         string retroRewindCompileInputsSha256 = "", string retroWfcPayloadSha256 = "",
-        long retroWfcPayloadLength = 0)
+        long retroWfcPayloadLength = 0, bool enableLegacyWfc = false, string cpuBaseline = "v3")
     {
         var executable = Path.Combine(outputDirectory,
             profile == BuildProfile.Base ? "WiiCompiled.exe" : "RetroRewind.exe");
         if (!File.Exists(executable))
             throw new FileNotFoundException("Cannot record build provenance because the compiled executable is missing.",
                 executable);
+        if (profile == BuildProfile.Base)
+        {
+            var local = JsonState.TryRead<LocalBuildProvenance>(
+                Path.Combine(outputDirectory, LocalBuildProvenance.FileName));
+            if (local is not { SchemaVersion: 1 } || local.LegacyWfcEnabled != enableLegacyWfc ||
+                !string.Equals(local.CpuBaseline, cpuBaseline, StringComparison.Ordinal))
+                throw new InvalidDataException(
+                    "The local base build did not consume the requested NewWFC-Legacy setting or CPU baseline.");
+        }
         if (profile == BuildProfile.RetroRewind)
         {
             var local = JsonState.TryRead<LocalBuildProvenance>(
@@ -167,10 +193,11 @@ internal sealed class LocalBuildService
                     retroWfcPayloadMode == RetroWfcPayloadMode.Online ? retroWfcPayloadSha256 : null,
                     StringComparison.OrdinalIgnoreCase) ||
                 (local.RetroWfcPayloadLength ?? 0) !=
-                (retroWfcPayloadMode == RetroWfcPayloadMode.Online ? retroWfcPayloadLength : 0))
+                (retroWfcPayloadMode == RetroWfcPayloadMode.Online ? retroWfcPayloadLength : 0) ||
+                !string.Equals(local.CpuBaseline, cpuBaseline, StringComparison.Ordinal))
             {
                 throw new InvalidDataException(
-                    "The local Retro Rewind build did not consume the selected Retro-WFC payload snapshot.");
+                    "The local Retro Rewind build did not consume the selected Retro-WFC payload snapshot or CPU baseline.");
             }
         }
 
@@ -183,6 +210,8 @@ internal sealed class LocalBuildService
             ExecutableSha256 = InputValidation.Sha256File(executable),
             CodePulSha256 = codePulSha256,
             RetroRewindCompileInputsSha256 = retroRewindCompileInputsSha256,
+            LegacyWfcEnabled = enableLegacyWfc,
+            CpuBaseline = cpuBaseline,
             RetroWfcPayloadMode = retroWfcPayloadMode switch
             {
                 RetroWfcPayloadMode.Online => "downloaded",

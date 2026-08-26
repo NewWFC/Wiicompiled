@@ -89,10 +89,13 @@ public sealed class PpcDisassembler : IDisposable
         int maxInstructions = 256,
         int maxBytes = 0x800,
         IReadOnlySet<uint>? knownFunctionEntryPoints = null,
-        BoundaryProbeLog? boundaryProbes = null)
+        BoundaryProbeLog? boundaryProbes = null,
+        uint? tolerateDecodeFailureFrom = null,
+        uint? tolerateDecodeFailureTo = null)
     {
         var instructions = DisassembleFunctionCore(
-            image, entryPoint, maxInstructions, maxBytes, knownFunctionEntryPoints, boundaryProbes, throwOnBudget: true);
+            image, entryPoint, maxInstructions, maxBytes, knownFunctionEntryPoints, boundaryProbes,
+            throwOnBudget: true, tolerateDecodeFailureFrom, tolerateDecodeFailureTo);
         return instructions!;
     }
 
@@ -106,9 +109,29 @@ public sealed class PpcDisassembler : IDisposable
         int maxInstructions,
         int maxBytes,
         IReadOnlySet<uint>? knownFunctionEntryPoints = null,
-        BoundaryProbeLog? boundaryProbes = null)
+        BoundaryProbeLog? boundaryProbes = null,
+        uint? tolerateDecodeFailureFrom = null,
+        uint? tolerateDecodeFailureTo = null)
         => DisassembleFunctionCore(
-            image, entryPoint, maxInstructions, maxBytes, knownFunctionEntryPoints, boundaryProbes, throwOnBudget: false);
+            image, entryPoint, maxInstructions, maxBytes, knownFunctionEntryPoints, boundaryProbes,
+            throwOnBudget: false, tolerateDecodeFailureFrom, tolerateDecodeFailureTo);
+
+    /// <summary>
+    /// True for a decoded instruction's placeholder mnemonic pattern (the decoder never throws for
+    /// an unrecognized opcode - it tags it "opc_N"/"unkN"/"xo_N"/"fp_N"/"invalid_..." instead, and
+    /// leaves whether that's fatal to the lifter). Used only when tolerateDecodeFailureFrom is set
+    /// (see its doc) - a false positive there just means one dead-end path inside a hand-written
+    /// Gecko ASM hook's own scratch code isn't explored, never anything about real game code, since
+    /// nothing here ever runs for an address below that threshold.
+    /// </summary>
+    private static bool LooksUnrecognized(PpcInstruction ins) =>
+        ins.Mnemonic is not ("nop" or "opc_0") &&
+        (ins.Mnemonic.StartsWith("opc_", StringComparison.Ordinal) ||
+         ins.Mnemonic.StartsWith("unk", StringComparison.Ordinal) ||
+         ins.Mnemonic.StartsWith("xo_", StringComparison.Ordinal) ||
+         ins.Mnemonic.StartsWith("fp_", StringComparison.Ordinal) ||
+         ins.Mnemonic.StartsWith("invalid_", StringComparison.Ordinal) ||
+         ins.Mnemonic == "unknown");
 
     private static IReadOnlyList<PpcInstruction>? DisassembleFunctionCore(
         ProgramImage image,
@@ -117,7 +140,9 @@ public sealed class PpcDisassembler : IDisposable
         int maxBytes,
         IReadOnlySet<uint>? knownFunctionEntryPoints,
         BoundaryProbeLog? boundaryProbes,
-        bool throwOnBudget)
+        bool throwOnBudget,
+        uint? tolerateDecodeFailureFrom = null,
+        uint? tolerateDecodeFailureTo = null)
     {
         if (!image.Contains(entryPoint, sizeof(uint)))
         {
@@ -176,6 +201,22 @@ public sealed class PpcDisassembler : IDisposable
                         cursor);
                 }
 
+                // A hand-written Gecko ASM hook's own scratch region (C2/C0 - see the translator
+                // CLI's AsmHookScratchBase/AsmHookScratchCapacity) is reserved exclusively for
+                // scratch code; no other guest function's disassembly walk may wander into it, no
+                // matter how plausible the bytes there happen to decode - they belong to whatever
+                // cheat is installed, not to this function. This is a hard, unconditional dead end
+                // (checked before even decoding) for any walk whose *own* entry point lies outside
+                // the range - a scratch function's own walk, entryPoint inside the range, is exempt
+                // so scratch code itself still disassembles normally.
+                if (tolerateDecodeFailureFrom is { } scratchStart &&
+                    tolerateDecodeFailureTo is { } scratchEnd &&
+                    cursor >= scratchStart && cursor < scratchEnd &&
+                    (entryPoint < scratchStart || entryPoint >= scratchEnd))
+                {
+                    break;
+                }
+
                 // Decode on demand
                 if (!instructionMap.TryGetValue(cursor, out var ins))
                 {
@@ -186,6 +227,27 @@ public sealed class PpcDisassembler : IDisposable
                     var cursorOffset = image.GetOffset(cursor, sizeof(uint));
                     var word = BinaryPrimitives.ReadUInt32BigEndian(image.Memory.AsSpan(cursorOffset, 4));
                     ins = PpcDecoder.Decode(cursor, word);
+
+                    // A hand-written Gecko ASM hook's own scratch code (C2/C0 - see the translator
+                    // CLI's AsmHookScratchBase) sometimes deliberately places raw data right after a
+                    // bl used only to capture a PC-relative pointer via mflr, never intending the
+                    // call to actually return there (see runtime/include/cheat_codes.h's own C2/C0
+                    // doc for the pattern). This recomp, like any static compiler, can't prove a bl
+                    // never returns, so it otherwise has to assume that data is reachable code and
+                    // fails to decode it. Only within the scratch address range - never for any real
+                    // game address - treat that failure as "this path is a dead end" instead of
+                    // poisoning the whole containing function's translation over unreachable bytes.
+                    // Both bounds matter: scratch is not guaranteed to sit above every real game
+                    // address (it can be relocated into a low-memory "Gecko hole"), so an open-ended
+                    // lower bound alone would also tolerate decode failures throughout ordinary game
+                    // code sitting above it.
+                    if (tolerateDecodeFailureFrom is { } threshold && cursor >= threshold &&
+                        (tolerateDecodeFailureTo is not { } end || cursor < end) &&
+                        LooksUnrecognized(ins))
+                    {
+                        break;
+                    }
+
                     instructionMap[cursor] = ins;
                 }
 

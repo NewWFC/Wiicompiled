@@ -96,6 +96,30 @@ public static class ModDataPatchWriter
         {
             sb.AppendLine("    std::memcpy(Memory::GetPointer(0x800017B0u, 20u), kKamekCodeSha1Digest, 20u);");
         }
+        sb.AppendLine("    {");
+        sb.AppendLine("        // DIAG (temporary): a self-pointer baked into the module image with bit 31");
+        sb.AppendLine("        // stripped would decode as (word + 0x80000000) landing back inside the module's");
+        sb.AppendLine("        // own [kModuleGuestBase, kModuleGuestBase+kModuleImageSize) range. Logging this");
+        sb.AppendLine("        // at load time (before any gameplay runs) tells us whether such pointers are");
+        sb.AppendLine("        // already wrong in the baked image, or only go bad later at runtime.");
+        sb.AppendLine("        uint32_t diagHits = 0;");
+        sb.AppendLine("        for (uint32_t off = 0; off + 4 <= kModuleImageSize; off += 4) {");
+        sb.AppendLine("            uint32_t word = Memory::Read32(kModuleGuestBase + off);");
+        sb.AppendLine("            if (word < 0x02000000u) {");
+        sb.AppendLine("                uint32_t candidate = word + 0x80000000u;");
+        sb.AppendLine("                if (candidate >= kModuleGuestBase && candidate < kModuleGuestBase + kModuleImageSize) {");
+        sb.AppendLine("                    if (diagHits < 32) {");
+        sb.AppendLine("                        std::cerr << \"[mod-diag] stripped-bit self-pointer candidate at 0x\" << std::hex << (kModuleGuestBase + off)");
+        sb.AppendLine("                                  << \" value=0x\" << word << \" (would be 0x\" << candidate << \" with bit31 set)\" << std::dec << std::endl;");
+        sb.AppendLine("                    }");
+        sb.AppendLine("                    ++diagHits;");
+        sb.AppendLine("                }");
+        sb.AppendLine("            }");
+        sb.AppendLine("        }");
+        sb.AppendLine("        if (diagHits != 0) {");
+        sb.AppendLine("            std::cerr << \"[mod-diag] \" << diagHits << \" stripped-bit self-pointer candidate(s) found in module image at load time.\" << std::endl;");
+        sb.AppendLine("        }");
+        sb.AppendLine("    }");
         sb.AppendLine("}");
         sb.AppendLine();
         EmitStaticPatchHelpers(sb);

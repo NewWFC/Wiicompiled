@@ -46,6 +46,29 @@ output:
   data_initializer: data_sections_init.cpp
   base_manifest: ../build/base/mkwii_base_manifest.json
 
+# NewWFC-Legacy: opt-in (--enable-legacy-wfc on generate-data-init) redirect of the base game's own
+# embedded GameSpy/NAS hostnames to a replacement domain, since Nintendo's real WFC servers are gone.
+# Applies independently of any profile - it rewrites literal strings already in the game's data
+# sections rather than lowering a signed patch payload, so it needs no module memory region and
+# works for the plain base build, not just Retro Rewind's own Retro-WFC payload mechanism.
+legacy_wfc:
+  domain: newwfc.xyz
+  rewrite_hosts:
+    - nintendowifi.net
+    - gamespy.net
+
+# Gecko/Action Replay "basic write" codes (types 00/01, 02/03, 04/05, 06/07, 08/09 - ba-relative
+# only, 'po' unsupported) whose target lands in executable game code (DOL or StaticR.rel) - a runtime
+# memory write can't change compiled behavior there (see
+# runtime/include/cheat_codes.h), so these get baked into the DOL/REL bytes *before*
+# translate-recursive decodes instructions from them, and the translator compiles the patched
+# instruction instead of the original. A data/RAM-target code does NOT belong here - it needs
+# per-frame reapplication against game logic, which only Config.toml's runtime [cheats] list does;
+# a code_patches entry targeting non-executable data fails the build with that pointer. Empty by
+# default - always applied when present, no opt-in flag (unlike legacy_wfc, this always changes
+# what gets compiled, so there's no "same build either way" case to gate).
+# code_patches:
+#   - "04381F40 60000000"
 profiles:
   retro-rewind:
     enabled: true
@@ -58,7 +81,7 @@ profiles:
     module_link_base: 0x803992E0
     output: build/mods/retro_rewind_full_cpp
     enable_retro_wfc: true
-    retro_wfc_payload: http://nas.play.rwfc.net/payload?g=RMCPD00
+    retro_wfc_payload: http://nas.newwfc.xyz/payload?g=RMCPD00
     retro_wfc_legacy_bootstrap_hook: 0x800ED6E8
     riivolution:
       xml: xml/RetroRewind6.xml

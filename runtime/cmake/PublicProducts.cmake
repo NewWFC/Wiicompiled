@@ -122,15 +122,28 @@ target_precompile_headers(mkw_runtime_common PRIVATE "${MKW_RUNTIME_SOURCE_DIR}/
 mkw_apply_common_compile_options(mkw_runtime_common)
 
 # Host ISA guard. Everything in MKW_ALL_BUILD_TARGETS below is compiled with
-# -march=x86-64-v3; this object library deliberately is not, which
-# is the whole point of keeping it out of mkw_runtime_common. It runs a CPUID
-# check from a C initializer so an unsupported machine gets a readable error
-# instead of an illegal-instruction crash. Excluded from the unity build and the
-# precompiled header because both are produced with the owning target's flags.
+# -march=${MKW_CPU_BASELINE_MARCH} (resolved just below from MKW_CPU_BASELINE);
+# this object library deliberately is not, which is the whole point of keeping
+# it out of mkw_runtime_common. It runs a CPUID check from a C initializer so
+# an unsupported machine gets a readable error instead of an illegal-instruction
+# crash. Excluded from the unity build and the precompiled header because both
+# are produced with the owning target's flags.
 add_library(mkw_cpu_baseline OBJECT "${MKW_CPU_BASELINE_SOURCE}")
 target_compile_features(mkw_cpu_baseline PRIVATE cxx_std_17)
 set_target_properties(mkw_cpu_baseline PROPERTIES UNITY_BUILD OFF)
 target_compile_options(mkw_cpu_baseline PRIVATE -w)
+
+# Resolve the -march value every compiled-from-source target below builds with, and tell the
+# guard object above which feature table to check against - the two must always agree, since the
+# guard's whole job is to reject a machine before it can execute anything built with this flag.
+if(MKW_CPU_BASELINE STREQUAL "v3")
+    set(MKW_CPU_BASELINE_MARCH "x86-64-v3")
+elseif(MKW_CPU_BASELINE STREQUAL "v2")
+    set(MKW_CPU_BASELINE_MARCH "x86-64-v2")
+    target_compile_definitions(mkw_cpu_baseline PRIVATE MKW_CPU_BASELINE_V2)
+else()
+    message(FATAL_ERROR "MKW_CPU_BASELINE must be 'v3' or 'v2' (got '${MKW_CPU_BASELINE}').")
+endif()
 
 if(NOT MKW_BASE_COMMON_SHARDS)
     message(FATAL_ERROR "Translator build graph contains no shared base shards")
@@ -287,6 +300,6 @@ set(MKW_ALL_BUILD_TARGETS
     mkw_retro_rewind_functions WiiCompiled RetroRewind)
 foreach(target IN LISTS MKW_ALL_BUILD_TARGETS)
     if(TARGET ${target})
-        target_compile_options(${target} PRIVATE -march=x86-64-v3)
+        target_compile_options(${target} PRIVATE -march=${MKW_CPU_BASELINE_MARCH})
     endif()
 endforeach()

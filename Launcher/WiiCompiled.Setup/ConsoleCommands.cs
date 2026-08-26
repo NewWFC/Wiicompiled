@@ -10,11 +10,13 @@ internal static class ConsoleCommands
         Console.Out.WriteLine("Wheel Wizard is the graphical interface for installing and launching WiiCompiled.");
         Console.Out.WriteLine();
         Console.Out.WriteLine("Commands:");
-        Console.Out.WriteLine("  --silent --game <image> --install-dir <dir> [--retro-dir <folder>] [--portable]");
+        Console.Out.WriteLine("  --silent --game <image> --install-dir <dir> [--retro-dir <folder>] [--portable] " +
+                             "[--enable-legacy-wfc] [--cpu-baseline auto|v3|v2]");
         Console.Out.WriteLine("  --verify-inputs --game <image> [--retro-dir <folder>]");
         Console.Out.WriteLine("  --check-products [--install-dir <dir>] [--retro-dir <folder>] [--progress-json]");
         Console.Out.WriteLine("  --repair-products --install-dir <dir> --retro-dir <folder> " +
-                             "(--download-retro-wfc-payload | --skip-retro-wfc-payload) [--progress-json]");
+                             "(--download-retro-wfc-payload | --skip-retro-wfc-payload) [--progress-json] " +
+                             "[--cpu-baseline auto|v3|v2]");
         Console.Out.WriteLine("  --launch-retro | --launch-base");
         Console.Out.WriteLine("  --uninstall --install-dir <dir>");
         Console.Out.WriteLine("  --version");
@@ -118,7 +120,9 @@ internal static class ConsoleCommands
                 RetroDirectoryPath = command.RetroDirectoryPath,
                 RetroWfcPayloadMode = command.RetroWfcPayloadMode,
                 InstallDirectory = installDirectory,
-                Portable = command.Portable
+                Portable = command.Portable,
+                EnableLegacyWfc = command.EnableLegacyWfc,
+                CpuBaselineOverride = command.CpuBaselineOverride
             }, cancellationToken);
             ndjson?.Success(installDirectory);
             return 0;
@@ -161,8 +165,12 @@ internal static class ConsoleCommands
                 ? SerializeProductsReport(report)
                 : $"base: {report.Base.Reason} {report.Base.Detail}".TrimEnd());
             if (!command.ProgressJson)
+            {
                 Console.Out.WriteLine(
                     $"retro-rewind: {report.RetroRewind.Reason} {report.RetroRewind.Detail}".TrimEnd());
+                Console.Out.WriteLine(
+                    $"cpu-baseline: {CpuBaselineDetector.DetectHost().ToFlag()} (what a rebuild would target on this machine)");
+            }
             Console.Out.Flush();
             reporter?.Success(installation.Root);
             return report.RebuildRequired ? 2 : 0;
@@ -221,7 +229,8 @@ internal static class ConsoleCommands
             var options = new ProductRepairService.ReconcileOptions
             {
                 ScratchRoot = scratch.Root,
-                CanonicalRetroRewindRoot = canonicalRoot
+                CanonicalRetroRewindRoot = canonicalRoot,
+                CpuBaseline = command.CpuBaselineOverride ?? CpuBaselineDetector.DetectHost()
             };
             var reconciliation = await service.RepairRetroAsync(snapshot, command.RetroWfcPayloadMode,
                 options, cancellationToken);
@@ -322,6 +331,12 @@ internal static class ConsoleCommands
             setupVersion = ProductInfo.Version,
             installDir = report.InstallDirectory,
             rebuildRequired = report.RebuildRequired,
+            // What CpuBaselineDetector.DetectHost() resolves to on THIS machine right now, i.e. the
+            // baseline a rebuild would target if one ran with no --cpu-baseline override (the normal
+            // case). Purely informational, not a status opinion - unlike the fields the v1 contract
+            // above explicitly guards against (see SelfTests.cs), this can never disagree with
+            // rebuildRequired/status, it just answers "what would I get."
+            cpuBaseline = CpuBaselineDetector.DetectHost().ToFlag(),
             @base = new { status = report.Base.Reason, detail = report.Base.Detail },
             retroRewind = new { status = report.RetroRewind.Reason, detail = report.RetroRewind.Detail }
         });

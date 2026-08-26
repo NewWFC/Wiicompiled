@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>WiiCompiled.SimpleUI</RootNamespace>
+    <AssemblyName>WiiCompiled.SimpleUI</AssemblyName>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <!-- Reused for cheat-code classification only (DolCodePatcher/RelCodePatcher/DolFile/RelFile):
+       whether a pasted Gecko code's target is a data address (Config.toml, live) or a code address
+       (recomp.yml code_patches, needs a recompile) is decided with the exact same logic the
+       translator itself uses, against the installed game's own extracted main.dol/StaticR.rel. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\translator\src\Translator.Core\Translator.Core.csproj" />
+  </ItemGroup>
+
+  <!-- Convenience only: if Build-Installer.ps1 has already produced Launcher/dist/WiiCompiled-Setup.exe,
+       drop a copy next to this UI so Settings.ResolveSetupExe() finds it with no browsing needed.
+       Best-effort - a missing source is not a build failure, since the UI works standalone too
+       (point it at any WiiCompiled-Setup.exe via "Locate..."). -->
+  <Target Name="CopyBundledSetupExe" AfterTargets="Build">
+    <ItemGroup>
+      <BundledSetupExe Include="$(MSBuildThisFileDirectory)..\dist\WiiCompiled-Setup.exe" Condition="Exists('$(MSBuildThisFileDirectory)..\dist\WiiCompiled-Setup.exe')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(BundledSetupExe)" DestinationFolder="$(OutDir)" Condition="'@(BundledSetupExe)' != ''" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

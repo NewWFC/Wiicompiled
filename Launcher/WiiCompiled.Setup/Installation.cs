@@ -11,6 +11,9 @@ internal sealed class LocalBuildProvenance
     public string? RetroWfcPayloadMode { get; set; }
     public string? RetroWfcPayloadSha256 { get; set; }
     public long? RetroWfcPayloadLength { get; set; }
+    public bool LegacyWfcEnabled { get; set; }
+    /// <summary>Same default reasoning as <see cref="ProductFingerprint.CpuBaseline"/>.</summary>
+    public string CpuBaseline { get; set; } = "v3";
     public string Compiler { get; set; } = "";
 
     public const string FileName = "local-build.json";

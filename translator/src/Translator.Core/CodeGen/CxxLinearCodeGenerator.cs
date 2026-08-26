@@ -28,6 +28,9 @@ public sealed partial class CxxLinearCodeGenerator
 
     private readonly IGuestFunctionAbiProvider _guestAbiProvider;
 
+    /// <summary>See <see cref="Translation.TranslationOptions.EmitPcTrace"/>.</summary>
+    private readonly bool _emitPcTrace;
+
     /// <summary>
     /// Reused scratch buffer for <c>EmitFunctionBody</c>, which emits a body up to three times
     /// (discovery, public entry, state-free fallback); checked out while in use so nested emission allocates its own.
@@ -37,9 +40,10 @@ public sealed partial class CxxLinearCodeGenerator
 
     private const int FunctionBodyBuilderCapacity = 16 * 1024;
 
-    public CxxLinearCodeGenerator(IGuestFunctionAbiProvider? guestAbiProvider = null)
+    public CxxLinearCodeGenerator(IGuestFunctionAbiProvider? guestAbiProvider = null, bool emitPcTrace = false)
     {
         _guestAbiProvider = guestAbiProvider ?? EmptyGuestFunctionAbiProvider.Instance;
+        _emitPcTrace = emitPcTrace;
     }
 
     /// <summary>
@@ -389,7 +393,7 @@ public sealed partial class CxxLinearCodeGenerator
                         _activeGpuFifoBurstSlot = gpuFifoBurstPlan.Slot(block.Label, i);
                         try
                         {
-                            EmitInstruction(block.Label, directCallOrdinal, block.Instructions[i], body, bufferBaseLength, 1, cfg, labelNames, types, signature, localPaired, _guestAbiProvider, knownConstants, localConstants, linkedAddressRemap, nonReturningCallTargets, lrContinuationCallTargets, stackFacts, inlineGuestThunkStackBase, localFallthroughLr, guestAbiContracts, stateFreeAbiContracts, stateFreeCallSymbols, stateFreeCallSiteVariants, modOverridableCallTargets);
+                            EmitInstruction(block.Label, directCallOrdinal, block.Instructions[i], body, bufferBaseLength, 1, cfg, labelNames, types, signature, localPaired, _guestAbiProvider, knownConstants, localConstants, linkedAddressRemap, nonReturningCallTargets, lrContinuationCallTargets, stackFacts, inlineGuestThunkStackBase, localFallthroughLr, guestAbiContracts, stateFreeAbiContracts, stateFreeCallSymbols, stateFreeCallSiteVariants, modOverridableCallTargets, _emitPcTrace);
                         }
                         finally
                         {
@@ -407,7 +411,7 @@ public sealed partial class CxxLinearCodeGenerator
                     switch (term)
                     {
                         case IrUndefined undef:
-                            EmitInstruction(block.Label, -1, undef, body, bufferBaseLength, 1, cfg, labelNames, types, signature, localPaired, _guestAbiProvider, knownConstants, localConstants, linkedAddressRemap, nonReturningCallTargets, lrContinuationCallTargets, stackFacts, inlineGuestThunkStackBase: false, localFallthroughLr: null, guestAbiContracts, stateFreeAbiContracts, stateFreeCallSymbols, stateFreeCallSiteVariants, modOverridableCallTargets);
+                            EmitInstruction(block.Label, -1, undef, body, bufferBaseLength, 1, cfg, labelNames, types, signature, localPaired, _guestAbiProvider, knownConstants, localConstants, linkedAddressRemap, nonReturningCallTargets, lrContinuationCallTargets, stackFacts, inlineGuestThunkStackBase: false, localFallthroughLr: null, guestAbiContracts, stateFreeAbiContracts, stateFreeCallSymbols, stateFreeCallSiteVariants, modOverridableCallTargets, _emitPcTrace);
                             AppendFlush(body, "    ");
                             body.AppendLine("    return;");
                             break;

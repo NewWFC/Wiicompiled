@@ -46,6 +46,15 @@ public sealed class InferredGuestFunctionAbiProvider : IGuestFunctionAbiProvider
     private readonly ProgramImage _image;
     private readonly ICanonicalIrProvider? _canonicalIr;
 
+    /// <summary>See <see cref="Translation.TranslationOptions.TolerateDecodeFailureFrom"/> - threaded
+    /// through here too so this provider's own speculative disassembly walk (used to infer a guest
+    /// function's register footprint) doesn't wander into a C2/C0 hook's scratch data table and
+    /// silently compute a truncated, too-narrow ABI for the function that contains it. Without this,
+    /// the main translation pass's own tolerance fix doesn't help: this class disassembles
+    /// independently, for ABI inference, and previously had no matching guard.</summary>
+    private readonly uint? _tolerateDecodeFailureFrom;
+    private readonly uint? _tolerateDecodeFailureTo;
+
     /// <summary>Lock-free ABI cache so parallel emission never serializes on ABI queries. A plain
     /// dictionary rather than a lazy is deliberate: mutually recursive queries would deadlock under a
     /// per-key computation lock. Worst case is two threads redundantly computing the same value.</summary>
@@ -81,10 +90,14 @@ public sealed class InferredGuestFunctionAbiProvider : IGuestFunctionAbiProvider
 
     public InferredGuestFunctionAbiProvider(
         ProgramImage image,
-        ICanonicalIrProvider? canonicalIr = null)
+        ICanonicalIrProvider? canonicalIr = null,
+        uint? tolerateDecodeFailureFrom = null,
+        uint? tolerateDecodeFailureTo = null)
     {
         _image = image;
         _canonicalIr = canonicalIr;
+        _tolerateDecodeFailureFrom = tolerateDecodeFailureFrom;
+        _tolerateDecodeFailureTo = tolerateDecodeFailureTo;
     }
 
     public bool TryGetGuestFunctionAbi(string target, out GuestFunctionAbi abi)
@@ -363,7 +376,8 @@ public sealed class InferredGuestFunctionAbiProvider : IGuestFunctionAbiProvider
     private IrFunction BuildLinearIr(uint entryPoint)
     {
         using var disassembler = new PpcDisassembler();
-        var instructions = disassembler.DisassembleFunction(_image, entryPoint, maxInstructions: 8192, maxBytes: 0x10000);
+        var instructions = disassembler.DisassembleFunction(_image, entryPoint, maxInstructions: 8192, maxBytes: 0x10000,
+            tolerateDecodeFailureFrom: _tolerateDecodeFailureFrom, tolerateDecodeFailureTo: _tolerateDecodeFailureTo);
         var basicBlocks = BasicBlockBuilder.Build(instructions);
         var lifted = new PpcLifter().Lift(instructions, true);
         var liftedByAddress = lifted.ToDictionary(x => x.Origin.Address, x => x.Ir);

@@ -891,6 +891,28 @@ void DumpAccessViolationReport(const Memory::AccessViolation& ex,
         RT_LOG(RT_TAG_RUNTIME) << "Nearest region: " << bestRegion << " (" << bestDistance << " bytes away)" << std::endl;
     }
 
+    // DIAG (temporary): a valid guest pointer that lost bit 31 (0x80000000) decodes as a
+    // "physical-looking" address just below whatever mapped region its virtual counterpart
+    // belongs to. Flip the bit back and see if *that* lands cleanly inside a mapped region -
+    // if so, this fault is almost certainly a corrupted-pointer bug, not a null/garbage read,
+    // and the flipped address is the pointer's actual intended value.
+    if (!insideRegion) {
+        const uint32_t flipped = address ^ 0x80000000u;
+        for (const auto& region : regions) {
+            const uint64_t base = region.baseAddress;
+            const uint64_t end = base + region.sizeBytes;
+            if (flipped >= base && flipped < end) {
+                RT_LOG(RT_TAG_RUNTIME) << "Hint: 0x" << std::hex << std::uppercase << std::setw(8)
+                          << std::setfill('0') << address << " with bit 31 flipped is 0x" << std::setw(8)
+                          << flipped << std::dec << std::nouppercase << std::setfill(' ')
+                          << ", which lands inside " << region.name
+                          << " - this looks like a valid pointer that lost/gained its top bit."
+                          << std::endl;
+                break;
+            }
+        }
+    }
+
     RT_LOG(RT_TAG_RUNTIME) << "Verify that the installed game data and runtime build match." << std::endl;
 }
 

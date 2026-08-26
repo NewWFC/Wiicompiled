@@ -50,12 +50,24 @@ struct RuntimeUserConfig {
     std::optional<bool> audioMixWorker;
     std::optional<bool> attenuateMusicWhenMediaPlays;
     std::optional<bool> networkEnabled;
+    // DWC's hidden logging bitmask (LEVEL_INFO=1, LEVEL_ERROR=2, ... see Config.toml's comment).
+    // Written into the guest's PAL DWC debug-log-level global at boot, exactly like the "PAL"
+    // memory-write code for this: 0 (or unset) leaves the game's own default in place.
+    std::optional<uint32_t> dwcDebugLogMask;
     std::optional<std::string> nandRoot;
     std::optional<std::string> dvdRoot;
     // The one canonical Retro Rewind installation, owned and updated by the frontend. Setup records
     // it here instead of copying the pack, so an asset-only update is visible on the next launch.
     std::optional<std::string> retroRewindRoot;
     std::vector<std::string> overlayRoots;
+    // "My Stuff" slot folders (SimpleUI's own file-layering UI, [my_stuff] roots in Config.toml) -
+    // resolved to absolute paths by SimpleUI, already in priority order (index 0 = highest). Unlike
+    // overlayRoots, which mirrors the disc's own folder layout, a My Stuff slot matches by filename
+    // regardless of where in the slot folder a file sits - see riivolution.cpp's RiivoDiscoverRoots.
+    std::vector<std::string> myStuffRoots;
+    // Gecko/AR-style simple RAM-write codes ("AAAAAAAA VVVVVVVV" per entry, types 00/02/04 only -
+    // see cheat_codes.h). Reapplied every VBlank, matching real codehandler behavior.
+    std::vector<std::string> cheatCodes;
     // Controller mappings use Wii/GameCube button names as keys and up to two
     // comma-separated SDL-style physical button names ("south", or
     // "dpad_up,left_shoulder") as values; pressing either bound button counts.
@@ -246,12 +258,36 @@ inline void EnsureConfigFile() {
               "# thread exactly as the runtime did before.\n"
               "mix_worker = true\n\n"
               "[network]\n"
-              "enabled = true\n\n"
+              "enabled = true\n"
+              "# DWC's hidden debug logging, printed through OSReport. Bitmask, e.g.\n"
+              "# 0xFFFFFFFF for everything, 0x00000002 for LEVEL_ERROR alone; add levels\n"
+              "# together. 0 or unset leaves it off.\n"
+              "# dwc_debug_log_mask = 0x00000000\n\n"
               "[paths]\n"
               "# dvd_root = \"D:\\\\MarioKartWii\\\\DATA\"\n"
               "# nand_root = \"D:\\\\WiiNand\"\n"
               "# retro_rewind_root = \"D:\\\\RetroRewind\\\\RetroRewind6\"\n"
-              "# overlay_roots = [\"D:\\\\RetroRewind\"]\n";
+              "# overlay_roots = [\"D:\\\\RetroRewind\"]\n\n"
+              "[my_stuff]\n"
+              "# \"My Stuff\" slot folders (see SimpleUI's My Stuff window) - highest priority of\n"
+              "# any overlay, above overlay_roots above and above Retro Rewind's own pack. A file\n"
+              "# anywhere under a slot folder replaces the disc file with the same *filename*,\n"
+              "# regardless of which folder it's actually in on the disc - drop \"a.brstm\"\n"
+              "# straight in a slot's root and it replaces every \"a.brstm\" the disc has, no need\n"
+              "# to mirror the disc's own folder layout. Index 0 is highest priority.\n"
+              "# roots = [\"D:\\\\...\\\\MyStuff\\\\Slot 1\"]\n\n"
+              "[cheats]\n"
+              "# Gecko/Action Replay \"basic write\" codes targeting RAM/data only - types 00/01\n"
+              "# (8-bit write & fill), 02/03 (16-bit), 04/05 (32-bit), 06/07 (string write - a\n"
+              "# raw byte sequence, however many lines its own byte count needs), and 08/09\n"
+              "# (write & fill with an address AND value increment, two lines). Paste each line\n"
+              "# exactly as given by a cheat database; a 08/09 or 06/07 code's extra line(s) are\n"
+              "# their own array entries right after the first. Reapplied every frame, same as a\n"
+              "# real Gecko codehandler. 'po' (pointer-relative) types, code hooks (C2), and\n"
+              "# anything else Gecko defines are not supported and are skipped with a warning.\n"
+              "# codes = [\n"
+              "#     \"04381F40 FFFFFFFF\",\n"
+              "# ]\n";
 }
 
 template <typename T>
@@ -379,6 +415,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.attenuateMusicWhenMediaPlays =
         FindConfigValue<bool>(document, "audio", "attenuate_music_when_media_plays");
     config.networkEnabled = FindConfigValue<bool>(document, "network", "enabled");
+    config.dwcDebugLogMask = FindConfigUint(document, "network", "dwc_debug_log_mask");
 
     config.nandRoot = FindConfigValue<std::string>(document, "paths", "nand_root");
     config.dvdRoot = FindConfigValue<std::string>(document, "paths", "dvd_root");
@@ -392,6 +429,19 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
         }
     } else if (auto roots = FindConfigValue<std::string>(document, "paths", "overlay_roots")) {
         AppendOverlayRoots(config, *roots);
+    }
+
+    if (auto myStuffRoots = FindConfigValue<std::vector<std::string>>(document, "my_stuff", "roots")) {
+        for (auto& root : *myStuffRoots) {
+            root = Trim(root);
+            if (!root.empty()) {
+                config.myStuffRoots.push_back(std::move(root));
+            }
+        }
+    }
+
+    if (auto codes = FindConfigValue<std::vector<std::string>>(document, "cheats", "codes")) {
+        config.cheatCodes = std::move(*codes);
     }
 
     return config;
@@ -411,6 +461,15 @@ inline RuntimeUserConfig LoadConfigFile() {
     EnsureConfigFile();
     std::ifstream file(ResolveConfigPath(), std::ios::binary);
     return file ? ParseConfig(file, ResolveConfigPath().string()) : RuntimeUserConfig{};
+}
+
+// Re-reads just Config.toml's [cheats] codes array from disk, independent of the cached
+// RuntimeUserConfig singleton below - so a cheat toggled in the Cheats UI while the game is
+// already running can be picked up without every other setting (paths, video, audio, ...) also
+// getting silently re-read mid-session, which nothing here is designed to react to. See
+// cheat_codes.h's periodic poll in ApplyAll for the caller.
+inline std::vector<std::string> ReloadCheatCodes() {
+    return LoadConfigFile().cheatCodes;
 }
 
 inline const RuntimeUserConfig& Get() {
@@ -741,6 +800,10 @@ inline bool NetworkEnabled(bool fallback = true) {
     return Get().networkEnabled.value_or(fallback);
 }
 
+inline uint32_t DwcDebugLogMask(uint32_t fallback = 0) {
+    return Get().dwcDebugLogMask.value_or(fallback);
+}
+
 inline std::string NandRoot(std::string fallback = "") {
     return Get().nandRoot.value_or(std::move(fallback));
 }
@@ -778,6 +841,11 @@ inline std::string RetroRewindRoot(std::string fallback = "") {
 
 inline const std::vector<std::string>& OverlayRoots() {
     return Get().overlayRoots;
+}
+
+// Already in priority order (index 0 = highest) - see RuntimeUserConfig::myStuffRoots.
+inline const std::vector<std::string>& MyStuffRoots() {
+    return Get().myStuffRoots;
 }
 
 inline void LogLoadedConfig() {
@@ -831,6 +899,10 @@ inline void LogLoadedConfig() {
             }
             if (config.networkEnabled) {
                 std::cout << " network_enabled=" << (*config.networkEnabled ? "true" : "false");
+            }
+            if (config.dwcDebugLogMask) {
+                std::cout << " dwc_debug_log_mask=0x" << std::hex << std::uppercase
+                           << *config.dwcDebugLogMask << std::dec << std::nouppercase;
             }
             if (config.nandRoot) {
                 std::cout << " nand_root=" << *config.nandRoot;

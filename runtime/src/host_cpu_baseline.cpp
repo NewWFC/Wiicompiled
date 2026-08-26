@@ -1,9 +1,15 @@
-// Host ISA guard. Every other product target builds with -march=x86-64-v3, so a pre-Haswell
-// Intel or pre-Excavator AMD machine would otherwise die on an illegal-instruction fault with no
-// explanation. This TU alone skips that flag (own CMake object library, excluded from unity
-// build/PCH) and runs from a priority-101 C initializer, ahead of every C++ dynamic initializer
-// and thus the first AVX2 code that could execute. Keep it free of anything that could pull in
-// vectorized code: no iostreams, no std::string, no runtime-wide headers.
+// Host ISA guard. Every other product target builds with -march=x86-64-v3 or -march=x86-64-v2
+// (MKW_CPU_BASELINE in PublicProducts.cmake), so a machine missing whichever set was chosen would
+// otherwise die on an illegal-instruction fault with no explanation. This TU alone skips that flag
+// (own CMake object library, excluded from unity build/PCH) and runs from a priority-101 C
+// initializer, ahead of every C++ dynamic initializer and thus the first vectorized instruction
+// that could execute. Keep it free of anything that could pull in vectorized code: no iostreams,
+// no std::string, no runtime-wide headers.
+//
+// MKW_CPU_BASELINE_V2, defined by PublicProducts.cmake exactly when the surrounding product was
+// configured with MKW_CPU_BASELINE=v2, switches the required-feature table and error text below to
+// the smaller x86-64-v2 set. It must always match whatever -march the rest of the product actually
+// built with - the two are set from the same CMake variable for exactly that reason.
 
 #include <cstdint>
 #include <cstdio>
@@ -50,6 +56,22 @@ struct CpuFeature {
 // Everything x86-64-v3 implies, which includes all of x86-64-v2. Spelled out so
 // the error message can name the exact instruction sets the machine lacks
 // rather than only "AVX2", which is merely the best known member of the set.
+#ifdef MKW_CPU_BASELINE_V2
+// x86-64-v2 only: the same leaf/subleaf/reg/bit entries as the v3 table below, just without
+// everything v3 adds on top (FMA, MOVBE, OSXSAVE, AVX, F16C, BMI1, AVX2, BMI2, LZCNT). Omitting
+// OSXSAVE here also means haveOsXsave in CollectMissingBaselineFeatures stays false, so the
+// XCR0/YMM-state check below it is automatically skipped - correct, since a v2 build never issues
+// a VEX-encoded instruction that state would gate.
+constexpr CpuFeature kRequiredFeatures[] = {
+    {"SSE3", 1, 0, 2, 0, false},
+    {"SSSE3", 1, 0, 2, 9, false},
+    {"CMPXCHG16B", 1, 0, 2, 13, false},
+    {"SSE4.1", 1, 0, 2, 19, false},
+    {"SSE4.2", 1, 0, 2, 20, false},
+    {"POPCNT", 1, 0, 2, 23, false},
+    {"LAHF-SAHF", 0x80000001u, 0, 2, 0, false},
+};
+#else
 constexpr CpuFeature kRequiredFeatures[] = {
     {"SSE3", 1, 0, 2, 0, false},
     {"SSSE3", 1, 0, 2, 9, false},
@@ -68,6 +90,7 @@ constexpr CpuFeature kRequiredFeatures[] = {
     {"LAHF-SAHF", 0x80000001u, 0, 2, 0, false},
     {"LZCNT", 0x80000001u, 0, 2, 5, false},
 };
+#endif
 
 // Fixed-capacity text accumulation: no allocation, no exceptions, nothing that
 // could route through code this file is trying to stay ahead of.
@@ -152,6 +175,15 @@ void WriteStdErrEarly(const char* text) {
 
 [[noreturn]] void ReportUnsupportedCpu(const char* missing) {
     TextBuffer message;
+#ifdef MKW_CPU_BASELINE_V2
+    message.Append(
+        "This build needs a processor that supports SSE4.2, POPCNT, CMPXCHG16B and the rest of "
+        "the x86-64-v2 instruction set.\n\nMissing on this machine: ");
+    message.Append(missing);
+    message.Append(
+        "\n\nx86-64-v2 covers Intel Core processors from Nehalem (2008) onward and AMD "
+        "processors from Bulldozer (2011) onward.");
+#else
     message.Append(
         "This build needs a processor that supports AVX2 and the rest of the "
         "x86-64-v3 instruction set.\n\nMissing on this machine: ");
@@ -159,6 +191,7 @@ void WriteStdErrEarly(const char* text) {
     message.Append(
         "\n\nx86-64-v3 covers Intel Core processors from Haswell (4th "
         "generation, 2013) onward and AMD processors from Excavator (2015) onward.");
+#endif
 
     // The tag matches RT_TAG_RUNTIME in runtime_log.h. It is spelled out here
     // because this translation unit must not include runtime-wide headers (see

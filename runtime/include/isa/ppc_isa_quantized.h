@@ -145,20 +145,29 @@ inline float PpcDequantizePsqInline(SignedType value, uint32_t scale)
     return static_cast<float>(value) * factor;
 }
 
+// These route through MemoryInline::Flat* (the always-succeeding, on-demand-committing flat
+// accessors that regular lwz/stw codegen and the paired-float psq fast path already use), not
+// Memory::Read*/Write* (the static-region-table "checked" path). The two paths disagree about
+// what counts as mapped: the flat path silently commits a fresh zero-filled page on first touch,
+// but the checked path only knows the startup region list and hard-aborts outside it. A quantized
+// "single" (W=1) psq_l/psq_st used to be the only psq access still on the checked path, so it
+// could hard-crash on an address the flat path had already treated as valid a moment earlier
+// (e.g. right after a neighboring paired psq_l on the same page silently absorbed the same kind
+// of touch). See the Debug Item Cycler crash investigation for the trace that found this.
 template <typename T>
 inline T PpcReadUnpairedPsqInline(uint32_t addr)
 {
     if constexpr (sizeof(T) == 1)
     {
-        return static_cast<T>(Memory::Read8(addr));
+        return static_cast<T>(MemoryInline::FlatRead8(addr));
     }
     else if constexpr (sizeof(T) == 2)
     {
-        return static_cast<T>(Memory::Read16(addr));
+        return static_cast<T>(MemoryInline::FlatRead16(addr));
     }
     else
     {
-        return static_cast<T>(Memory::Read32(addr));
+        return static_cast<T>(MemoryInline::FlatRead32(addr));
     }
 }
 
@@ -167,17 +176,17 @@ inline std::pair<T, T> PpcReadPairPsqInline(uint32_t addr)
 {
     if constexpr (sizeof(T) == 1)
     {
-        const uint16_t packed = Memory::Read16(addr);
+        const uint16_t packed = MemoryInline::FlatRead16(addr);
         return { static_cast<T>(packed >> 8), static_cast<T>(packed) };
     }
     else if constexpr (sizeof(T) == 2)
     {
-        const uint32_t packed = Memory::Read32(addr);
+        const uint32_t packed = MemoryInline::FlatRead32(addr);
         return { static_cast<T>(packed >> 16), static_cast<T>(packed) };
     }
     else
     {
-        const uint64_t packed = Memory::Read64(addr);
+        const uint64_t packed = MemoryInline::FlatRead64(addr);
         return { static_cast<T>(packed >> 32), static_cast<T>(packed) };
     }
 }
@@ -187,15 +196,15 @@ inline void PpcWriteUnpairedPsqInline(uint32_t addr, T value)
 {
     if constexpr (sizeof(T) == 1)
     {
-        Memory::Write8(addr, static_cast<uint8_t>(value));
+        MemoryInline::FlatWrite8(addr, static_cast<uint8_t>(value));
     }
     else if constexpr (sizeof(T) == 2)
     {
-        Memory::Write16(addr, static_cast<uint16_t>(value));
+        MemoryInline::FlatWrite16(addr, static_cast<uint16_t>(value));
     }
     else
     {
-        Memory::Write32(addr, static_cast<uint32_t>(value));
+        MemoryInline::FlatWrite32(addr, static_cast<uint32_t>(value));
     }
 }
 
@@ -205,17 +214,17 @@ inline void PpcWritePairPsqInline(uint32_t addr, T first, T second)
     if constexpr (sizeof(T) == 1)
     {
         const uint16_t packed = (static_cast<uint16_t>(first) << 8) | static_cast<uint16_t>(second);
-        Memory::Write16(addr, packed);
+        MemoryInline::FlatWrite16(addr, packed);
     }
     else if constexpr (sizeof(T) == 2)
     {
         const uint32_t packed = (static_cast<uint32_t>(first) << 16) | static_cast<uint32_t>(second);
-        Memory::Write32(addr, packed);
+        MemoryInline::FlatWrite32(addr, packed);
     }
     else
     {
         const uint64_t packed = (static_cast<uint64_t>(first) << 32) | static_cast<uint64_t>(second);
-        Memory::Write64(addr, packed);
+        MemoryInline::FlatWrite64(addr, packed);
     }
 }
 
@@ -264,23 +273,26 @@ inline double PpcLoadSinglePsqFloatFastInline(uint32_t addr)
 template <typename ValueType>
 inline double PpcLoadPairPsqIntegerFastInline(uint32_t addr, uint32_t scale = 0u)
 {
+    // See PpcReadPairPsqInline above: this must stay on the flat, on-demand-committing
+    // accessors, not Memory::Read* (the static-region-table checked path), for the same
+    // reason - it is the same class of quantized-pair load, just inlined separately.
     if constexpr (sizeof(ValueType) == 1)
     {
-        const uint16_t packed = Memory::Read16(addr);
+        const uint16_t packed = MemoryInline::FlatRead16(addr);
         return PpcMakePairedResultInline(
             PpcDequantizePsqInline(static_cast<ValueType>(packed >> 8), scale),
             PpcDequantizePsqInline(static_cast<ValueType>(packed), scale)).d;
     }
     else if constexpr (sizeof(ValueType) == 2)
     {
-        const uint32_t packed = Memory::Read32(addr);
+        const uint32_t packed = MemoryInline::FlatRead32(addr);
         return PpcMakePairedResultInline(
             PpcDequantizePsqInline(static_cast<ValueType>(packed >> 16), scale),
             PpcDequantizePsqInline(static_cast<ValueType>(packed), scale)).d;
     }
     else
     {
-        const uint64_t packed = Memory::Read64(addr);
+        const uint64_t packed = MemoryInline::FlatRead64(addr);
         return PpcMakePairedResultInline(
             PpcDequantizePsqInline(static_cast<ValueType>(packed >> 32), scale),
             PpcDequantizePsqInline(static_cast<ValueType>(packed), scale)).d;
