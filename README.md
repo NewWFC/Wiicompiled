@@ -1,7 +1,18 @@
 
 # Disclaimer
-Current NewWFC feature does not use the payload, will be added on future commits
+Current NewWFC feature does not use the payload and will be added in future commits.
 Use at your own risk.
+
+Current added features:
+- "Simple" UI for compiling and MyStuff management, including cheats
+- NewWFC (Legacy) support
+- MyStuff
+- Cheats (04 working, c2 somewhat working, c0 untested)
+
+Also, as always:
+## AI usage
+AI coding tools were used during development of this project.
+Take its accuracy and stability with a grain of salt.
 
 # WiiCompiled
 
