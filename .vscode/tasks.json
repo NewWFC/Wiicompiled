@@ -1,0 +1,165 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "WiiCompiled: Prepare offline dependencies",
+            "detail": "Fetch the pinned third-party sources Build-Installer.ps1 needs into Launcher/artifacts/dependencies",
+            "type": "shell",
+            "command": "pwsh",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}/tools/Prepare-OfflineDependencies.ps1"
+            ],
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "WiiCompiled: Build translator CLI",
+            "detail": "dotnet build the Translator CLI (Release) so Generate-BuildShards.ps1 has something to run",
+            "type": "shell",
+            "command": "dotnet",
+            "args": [
+                "build", "translator/src/Translator.Cli/Translator.Cli.csproj", "-c", "Release"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": ["$msCompile"],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "WiiCompiled: Generate build shards",
+            "detail": "Translate the base game once (needs Assets/main.dol + Assets/StaticR.rel) so runtime/ can configure",
+            "type": "shell",
+            "command": "pwsh",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}/tools/Generate-BuildShards.ps1"
+            ],
+            "dependsOn": ["WiiCompiled: Build translator CLI"],
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "WiiCompiled: Build prerequisites",
+            "detail": "Everything Build-Installer.ps1 needs before it can run: offline deps + translator CLI + build shards",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "WiiCompiled: Prepare offline dependencies",
+                "WiiCompiled: Generate build shards"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "WiiCompiled: Build installer",
+            "detail": "Run Launcher/Build-Installer.ps1 end to end (native_prebuilt, publish, package)",
+            "type": "shell",
+            "command": "pwsh",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}/Launcher/Build-Installer.ps1",
+                "-DolphinToolPath", "${workspaceFolder}/tools/Dolphin-x64/DolphinTool.exe"
+            ],
+            "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "WiiCompiled: Build standalone UI",
+            "detail": "dotnet build the standalone install/play UI (WiiCompiled.SimpleUI) - no Wheel Wizard involved",
+            "type": "shell",
+            "command": "dotnet",
+            "args": [
+                "build", "Launcher/WiiCompiled.SimpleUI/WiiCompiled.SimpleUI.csproj", "-c", "Release"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": ["$msCompile"],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "WiiCompiled: Publish standalone UI (single exe)",
+            "detail": "dotnet publish WiiCompiled.SimpleUI as one self-contained exe to Launcher/dist, same flags Build-Installer.ps1 uses for the setup host",
+            "type": "shell",
+            "command": "dotnet",
+            "args": [
+                "publish", "Launcher/WiiCompiled.SimpleUI/WiiCompiled.SimpleUI.csproj",
+                "-c", "Release", "-r", "win-x64", "--self-contained", "true",
+                "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true",
+                "-p:EnableCompressionInSingleFile=true", "-p:DebugType=None",
+                "-o", "Launcher/dist"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": ["$msCompile"],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "WiiCompiled: Build all standalone exes",
+            "detail": "Build installer (compiler + toolkit, embedded) and publish the UI (single exe) together into Launcher/dist",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "WiiCompiled: Build installer",
+                "WiiCompiled: Publish standalone UI (single exe)"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "WiiCompiled: Publish standalone UI (debug, single exe)",
+            "detail": "dotnet publish WiiCompiled.SimpleUI as a self-contained Debug exe (no optimizations, full PDBs) to Launcher/dist/debug - for diagnosing the UI itself, not for distribution.",
+            "type": "shell",
+            "command": "dotnet",
+            "args": [
+                "publish", "Launcher/WiiCompiled.SimpleUI/WiiCompiled.SimpleUI.csproj",
+                "-c", "Debug", "-r", "win-x64", "--self-contained", "true",
+                "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true",
+                "-o", "Launcher/dist/debug"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": ["$msCompile"],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "WiiCompiled: Publish standalone Setup (debug, single exe)",
+            "detail": "Publishes WiiCompiled.Setup as a self-contained Debug exe (no optimizations, full PDBs) to Launcher/dist/debug/WiiCompiled-Setup.exe, then re-hosts the real installer payload from Launcher/dist/WiiCompiled-Setup.exe onto it - so it gets .NET Debug diagnostics but can still run --silent/compile the game. Not for distribution. Requires 'WiiCompiled: Build installer' to have produced Launcher/dist/WiiCompiled-Setup.exe first.",
+            "type": "shell",
+            "command": "pwsh",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}/tools/Publish-DebugSetup.ps1"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": ["$msCompile"],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "WiiCompiled: Rebuild installed base with PC tracing (diagnostic)",
+            "detail": "Rebuilds the installed Base/WiiCompiled.exe directly via LocalBuild.ps1 with -EmitPcTrace, so the next crash report shows the exact faulting guest instruction instead of an approximate stack-scan guess. Every lowered instruction writes its own address into ctx->pc, so this build is slower than normal - diagnostic only, never shipped, and never left cached as reusable by a later ordinary build. Close the game first (it locks Base/WiiCompiled.exe).",
+            "type": "shell",
+            "command": "pwsh",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}/Launcher/LocalBuild.ps1",
+                "-Workspace", "C:/Users/aguil/AppData/Local/Programs/WiiCompiled/BuildWorkspace",
+                "-Toolkit", "C:/Users/aguil/AppData/Local/Programs/WiiCompiled/Toolkit",
+                "-Profile", "base",
+                "-OutputDirectory", "C:/Users/aguil/AppData/Local/Programs/WiiCompiled/Base",
+                "-ForceCleanBuild",
+                "-EmitPcTrace"
+            ],
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "WiiCompiled: Run standalone UI",
+            "detail": "Launch the standalone install/play UI",
+            "type": "shell",
+            "command": "${workspaceFolder}/Launcher/WiiCompiled.SimpleUI/bin/Release/net8.0-windows/WiiCompiled.SimpleUI.exe",
+            "args": [],
+            "dependsOn": ["WiiCompiled: Build standalone UI"],
+            "problemMatcher": [],
+            "presentation": { "reveal": "silent", "panel": "dedicated" }
+        }
+    ]
+}
