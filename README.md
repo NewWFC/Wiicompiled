@@ -7,7 +7,9 @@ Current added features:
 - "Simple" UI for compiling and MyStuff management, including cheats
 - NewWFC (Legacy) support
 - MyStuff
-- Cheats (04 working, c2 somewhat working, c0 untested)
+- Cheats (00, 02, 04, 06 working, c2 somewhat working, c0 untested)
+support for live cheat toggle if they only edit data sections, not code sections
+- CPU: automatic compatibility build for CPUs without AVX2/FMA (Intel 2008+ / AMD 2011+, auto-detected, no action needed)
 
 Also, as always:
 ## AI usage
@@ -77,13 +79,19 @@ inputs like paddles, touchpads and share buttons show up when the hardware repor
 
 - Windows 10 or 11, 64-bit
 - GPU: GTX 1650 / RX 6400 / Arc A310 or higher
-- CPU: Intel Core i5-8400 / AMD Ryzen 5 2600 (4c/6c, ~3.5GHz+) or higher
+- CPU: Intel Core i5-8400 / AMD Ryzen 5 2600 (4c/6c, ~3.5GHz+) or higher, for full performance
 - About 20 GB of free disk space during installation
 - A clean, unmodified **PAL `RMCP01`** disc image of Mario Kart Wii, dumped by you. ISO, GCM,
   GCZ, CISO, WBFS, WIA and RVZ are accepted.
 
 > [!NOTE]
 > GPU/CPU minimums are set by driver support and D3D12/Vulkan feature requirements, not by the game's actual demands.
+
+> [!NOTE]
+> Older CPUs aren't left out: setup detects processors without AVX2/FMA (anything older than
+> Intel Haswell/2013 or AMD Excavator/2015, down to Intel Nehalem/2008 or AMD Bulldozer/2011) and
+> automatically compiles a compatibility build for them instead. It's slower, but it runs. No
+> flags or choices to make, this happens on its own during install.
 
 Only the clean PAL revision will work. Anything else (other
 regions, patched executables) is rejected outright.
